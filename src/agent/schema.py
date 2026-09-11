@@ -1,0 +1,110 @@
+"""
+数据模型定义
+ProcurementContext、UserPreferences、ChatRequest 等 Pydantic 模型
+定义整个项目中流转的数据结构。这是类型安全的保障——所有请求、响应、上下文都通过这些模型约束。
+"""
+from typing import Optional, List, Literal
+from pydantic import BaseModel, Field
+from datetime import datetime
+from enum import Enum
+
+
+class UserPreferences(BaseModel):
+    """用户偏好模型"""
+    #Field 是 Pydantic 库中的一个函数，用于为数据模型的字段添加元数据（额外的描述信息）和验证规则。 例如default  description 还有min_length max_length等等
+    preferred_output: str = Field(default="markdown", description="首选输出格式: markdown/table/json")
+    preferred_chart_type: str = Field(default="bar", description="首选图表类型: bar/line/pie/scatter等")
+    preferred_currency: str = Field(default="CNY", description="首选货币单位")
+    preferred_language: str = Field(default="zh", description="首选语言: zh/en")
+    recent_suppliers: List[str] = Field(default_factory=list, description="最近查询的供应商")
+    recent_queries: List[str] = Field(default_factory=list, description="最近的查询记录")
+
+
+class ProcurementContext(BaseModel):
+    """采购上下文 - 每次请求注入到 Agent state"""
+    user_id: str = Field(default="default_user", description="用户ID")
+    username: str = Field(default="用户", description="用户名")
+    preferences: dict = Field(default_factory=dict, description="用户偏好字典")
+    session_start: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class ChatRequest(BaseModel):
+    """聊天请求模型"""
+    message: str = Field(..., description="用户消息内容")
+    thread_id: str = Field(default=None, description="会话线程ID，为空则创建新会话")
+    user_id: str = Field(default="default_user", description="用户ID")
+    username: str = Field(default="用户", description="用户名")
+
+
+class ResumeRequest(BaseModel):
+    """中断恢复请求模型"""
+    resume: dict = Field(..., description="恢复数据，格式取决于中断类型")
+
+
+class SSEEvent(BaseModel):
+    """SSE 事件模型"""
+    event: str = Field(..., description="事件类型: token/tool_start/tool_args/tool_result/tool_end/interrupt/done")
+    data: dict = Field(default_factory=dict, description="事件数据")
+
+
+class ConversationRecord(BaseModel):
+    """会话记录"""
+    thread_id: str
+    user_id: str
+    title: str = "新对话"
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class DisplayMessage(BaseModel):
+    """前端展示消息"""
+    role: str = Field(..., description="角色: user/assistant/tool")
+    content: str = Field(default="", description="消息内容")
+    tool_calls: Optional[List[dict]] = Field(default=None, description="工具调用信息")
+    source: Optional[str] = Field(default=None, description="来源: main/analyst/order")
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+# ============================================================
+# Harness 架构结构化状态模型（Planning → Executing → Review → Result）
+# 用于替代 prompt 软约束：阶段、计划、评审结果都是可校验的强类型数据
+# ============================================================
+
+class Phase(str, Enum):
+    """Harness 工作流阶段（图状态机，非文本猜测）"""
+    thinking = "thinking"      # 思考中（初始态）
+    planning = "planning"      # Planning：生成任务规划
+    executing = "executing"    # Executing：调用工具/子Agent执行
+    reviewing = "reviewing"    # Review：评审器校验结果
+    result = "result"          # Result：结构化输出最终结果
+
+
+class PlanStep(BaseModel):
+    """规划中的单个步骤（对应 TodoListMiddleware 的 todo 项，但增加 result 回填）"""
+    id: str = Field(..., description="步骤唯一标识")
+    content: str = Field(..., description="步骤描述")
+    status: Literal["pending", "in_progress", "completed"] = Field(
+        default="pending", description="步骤状态"
+    )
+    result: Optional[str] = Field(default=None, description="步骤执行结果摘要")
+
+
+class Plan(BaseModel):
+    """Harness Planning 阶段的产物：结构化任务规划"""
+    steps: List[PlanStep] = Field(default_factory=list, description="规划步骤列表")
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    current_step: Optional[str] = Field(default=None, description="当前执行中的步骤 id")
+
+
+class ReviewResult(BaseModel):
+    """Harness Review 阶段的产物：评审器对执行结果的判定
+
+    由 RubricMiddleware 的 grader 子Agent 产出，结构化而非 LLM 自述文本。
+    """
+    verdict: Literal[
+        "satisfied", "needs_revision", "failed",
+        "max_iterations_reached", "grader_error",
+    ] = Field(..., description="评审判定")
+    explanation: str = Field(default="", description="评审结论说明")
+    criteria: List[dict] = Field(default_factory=list, description="逐条评审标准判定")
+    iteration: int = Field(default=0, description="评审迭代次数")

@@ -125,15 +125,77 @@ Agent 严格遵循四阶段工作流：
 | 4 | SkillsSyncMiddleware | 技能文件夹级增量同步 |
 | 5 | UserSkillsRestoreMiddleware | 用户自定义技能恢复 |
 | 6 | ToolsSummarizationMiddleware | 工具调用摘要监控 |
-| 7 | MemoryUpdateMiddleware | 用户偏好自动提取 |
-| 8 | SandboxCircuitBreakerMiddleware | 沙箱熔断器（三态模型） |
-| 9 | RubricMiddleware | 复杂任务结果审查与有限次重做 |
-| 10 | ModelCallLimitMiddleware | 模型调用次数限制 |
-| 11 | ToolCallLimitMiddleware | 工具调用次数限制 |
+| 7 | MemoryUpdateMiddleware | 用户偏好自动提取与合并（WARM 层） |
+| 8 | MemoryConsolidationMiddleware | 情节归档 + 遗忘扫描（COLD 层） |
+| 9 | SandboxCircuitBreakerMiddleware | 沙箱熔断器（三态模型） |
+| 10 | RubricMiddleware | 复杂任务结果审查与有限次重做 |
+| 11 | ModelCallLimitMiddleware | 模型调用次数限制 |
+| 12 | ToolCallLimitMiddleware | 工具调用次数限制 |
 
 ### 7. 33 个工具
 - **23 个 MCP 工具**：供应商(5) + 零部件(5) + 订单(7) + 库存(6)
 - **10 个自定义工具**：chart_generator, web_search, web_fetch, install_skill, list_user_skills, request_order_info, download_sandbox_file, list_sandbox_files, generate_document, generate_table_report
+
+---
+
+## 三层记忆架构（HOT / WARM / COLD）
+
+记忆分三层，每层有独立的介质、检索路径和生命周期，本质是把 CPU 缓存分层
+（L1/L2/磁盘）映射到 Agent 上：
+
+| 层 | 内容 | 介质 | 体积目标 | 策略 |
+|---|---|---|---|---|
+| **HOT** | 当前会话消息、工具结果、活跃 todo | LangGraph Checkpointer（MongoDB） | — | 会话结束即压实下沉 |
+| **WARM** | 用户稳定偏好、近 7 天情节摘要 | MongoDBStore，常驻注入 system_prompt | 1–3K token | 变更才更新，永不随意裁剪 |
+| **COLD** | 全部历史情节、程序记忆 | MongoDBStore，按需检索 | 无上限 | BM25 + 时间衰减检索 top-k |
+
+### 记忆类型
+
+沿用认知科学的三分类，与业界共识（Mem0 / Zep / Letta / LangMem）一致：
+
+- **语义记忆 semantic**：用户偏好等稳定事实，带**双时态**
+  （`valid_from` / `invalidated_at`）——用户"改口"时旧值不删除，而是标记失效沉入 COLD，
+  既保证当前取值唯一正确，又保留可追溯的历史
+- **情节记忆 episodic**：每次会话归档一条（`ep_<thread_id>`，幂等），
+  90 天后遗忘，7 天后从 WARM 下沉到 COLD
+- **程序记忆 procedural**：经验与流程，按需检索，不做无脑注入
+
+### 命名空间规范
+
+```
+("memories", <user_id>, "semantic")     用户级稳定事实
+("memories", <user_id>, "episodic")     用户级情节归档
+("memories", <user_id>, "procedural")   用户级经验/流程
+("memories", "org",     "policies")     组织级只读策略
+("user-preferences", <user_id>)         WARM 投影（偏好字典缓存，供提示词注入）
+```
+
+`user-preferences` 命名空间保留但**语义变了**：它不再是记忆本体，而是 WARM 层
+的一份单向投影，由 `MemoryKeeper` 同步，真正的本体在 `memories` 下。
+
+### 关键实现
+
+| 文件 | 职责 |
+|---|---|
+| `src/agent/memory/types.py` | 记忆条目模型（双时态、溯源、生命周期） |
+| `src/agent/memory/keeper.py` | **唯一写入口**：合并、冲突消解、检索、遗忘 |
+| `src/agent/memory/scoring.py` | COLD 检索打分（BM25 + 时间衰减 + 频次 + 置信度） |
+| `src/agent/memory/extractor.py` | 偏好抽取与情节摘要（默认零 LLM 调用） |
+| `middlewares/memory_update.py` | WARM 层偏好写入 |
+| `middlewares/memory_consolidation.py` | 情节归档 + 遗忘扫描（按间隔节流） |
+| `tools/memory_tools.py` | `read_memory` / `remember`，COLD 层按需取用 |
+
+设计约束：**所有记忆读写只经过 `MemoryKeeper` 一个出口**，避免多个写入方互相覆盖；
+整合与遗忘**不调用 LLM**且全流程吞异常，延迟和稳定性都不受影响。
+
+### 验证
+
+```bash
+python -m src.test.test_memory_layer
+```
+
+不依赖 MongoDB / Docker / DeepSeek / langchain，用内存假 Store 跑，
+覆盖偏好合并、冲突消解、分层下沉、遗忘、检索排序与容错共 32 个用例。
 
 ---
 
@@ -172,7 +234,14 @@ ERP-AGENT/
 │   │   │   ├── web_fetch.py           # URL抓取 + Skill安装
 │   │   │   └── hitl_tools.py          # HITL 人工介入
 │   │   ├── subagents/                 # 子Agent（YAML声明式）
-│   │   └── memory/                    # 系统提示词 + 操作手册
+│   │   └── memory/                    # 三层记忆 + 系统提示词
+│   │       ├── types.py               #   记忆条目模型（双时态/溯源/生命周期）
+│   │       ├── keeper.py              #   唯一读写口（合并/冲突/检索/遗忘）
+│   │       ├── scoring.py             #   COLD 检索打分（BM25 + 衰减）
+│   │       ├── extractor.py           #   偏好抽取 + 情节摘要（零 LLM 调用）
+│   │       ├── namespaces.py          #   命名空间规范
+│   │       ├── config.py              #   分层与生命周期参数
+│   │       └── prompts.py             #   系统提示词 + 记忆使用规范
 │   ├── api_view/                      # FastAPI Web 层
 │   │   ├── web_main.py                # 应用入口
 │   │   ├── agent_loader.py            # Agent 单例（MongoDB持久化）
@@ -343,6 +412,17 @@ Agent 不直接调用 ERP API，而是通过 MCP Server 提供的 23 个标准�
 
 ### 10. 技能系统（Skills）
 文件夹级技能管理（SKILL.md + 脚本 + 依赖），支持安装/同步/恢复。SkillsSyncMiddleware 实现增量同步（SHA256 哈希比对），保留完整目录结构。
+
+### 11. 三层记忆治理（HOT / WARM / COLD）
+不是"能存就算有记忆"，而是完整的分层治理：语义 / 情节 / 程序三类型分离、
+命名空间规范化、**双时态冲突消解**（用户改口时旧值标记失效而非覆盖）、
+异步整合（会话结束自动归档情节）、**可配置的遗忘策略**（TTL + 超量淘汰 + 衰减）。
+所有读写收敛到单一出口 `MemoryKeeper`，消除多方写入互相覆盖的隐患。
+
+### 12. 上下文经济
+COLD 层历史**不进系统提示词**，由 `read_memory` 工具按需检索
+（BM25 + 时间衰减 + 引用频次 + 置信度加权），WARM 层常驻内容控制在 1–3K token；
+偏好抽取走确定性规则，**零额外 LLM 调用**。用更少的 token 拿到更相关的上下文。
 
 ---
 

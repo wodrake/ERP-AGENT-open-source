@@ -23,7 +23,9 @@ from .config import (
 )
 from .schema import ProcurementContext
 from .log_utils import agent_logger
-from .memory.prompts import MAIN_SYSTEM_PROMPT
+from .memory.config import DEFAULT_MEMORY_CONFIG
+from .memory.keeper import MemoryKeeper
+from .memory.prompts import MAIN_SYSTEM_PROMPT, MEMORY_USAGE_PROMPT
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -195,10 +197,11 @@ async def precompute_agent_context(
     """
     预计算 Agent 上下文
 
-    从 Store 加载用户历史偏好，构造完整的 ProcurementContext。
+    从 Store 加载用户历史偏好与 WARM 层记忆摘要，构造完整的 ProcurementContext。
     如果 Store 不可用则使用默认值。
     """
     preferences = {}
+    warm_memory = ""
 
     if store is not None:
         try:
@@ -212,10 +215,21 @@ async def precompute_agent_context(
         except Exception as e:
             agent_logger.warning(f"Failed to load preferences: {e}")
 
+        # WARM 层：语义记忆（偏好）+ 近期情节摘要，常驻注入系统提示词
+        try:
+            keeper = MemoryKeeper(store, user_id, DEFAULT_MEMORY_CONFIG)
+            keeper.migrate_legacy_preferences()
+            warm_memory = keeper.build_warm_brief()
+            if not preferences:
+                preferences.update(keeper.load_preferences())
+        except Exception as e:
+            agent_logger.warning(f"Failed to build warm memory: {e}")
+
     return ProcurementContext(
         user_id=user_id,
         username=username,
         preferences=preferences,
+        warm_memory=warm_memory,
     )
 
 
@@ -309,6 +323,11 @@ def create_main_agent(
     custom_tools = [generate_chart, web_search, web_fetch, install_skill, list_user_skills, request_order_info,
                     download_sandbox_file, list_sandbox_files,
                     generate_document, generate_table_report]
+
+    # 三层记忆：COLD 层按需检索 + 显式写入（WARM 层已在系统提示词里常驻注入）
+    if DEFAULT_MEMORY_CONFIG.memory_tools_enabled:
+        from .tools.memory_tools import read_memory, remember
+        custom_tools.extend([read_memory, remember])
     all_tools = mcp_tools + custom_tools
 
     agent_logger.info(
@@ -330,6 +349,7 @@ def create_main_agent(
     from .middlewares.user_skills_restore import UserSkillsRestoreMiddleware
     from .middlewares.tools_summarization import ToolsSummarizationMiddleware
     from .middlewares.memory_update import MemoryUpdateMiddleware
+    from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
     from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
     # Harness 阶段状态机 + 评审器（真 Harness 架构核心）
     from .harness import HarnessPhaseMiddleware, load_harness_config
@@ -378,7 +398,8 @@ def create_main_agent(
         skills_sync_middleware,                                       # 4. 基础 Skills 同步
         user_skills_restore_middleware,                               # 5. 用户 Skills 恢复
         ToolsSummarizationMiddleware(),                               # 6. 摘要监控
-        MemoryUpdateMiddleware(store=store, user_id=user_context.user_id),      # 7. 偏好提取
+        MemoryUpdateMiddleware(store=store, user_id=user_context.user_id),      # 7. 偏好提取（WARM）
+        MemoryConsolidationMiddleware(store=store, user_id=user_context.user_id),   # 7.5 情节归档 + 遗忘（COLD）
         SandboxCircuitBreakerMiddleware(failure_threshold=3, recovery_timeout=60),  # 8. 熔断器
         # --- Harness 评审器（RubricMiddleware）---
         # 收到 rubric 后，grader 子Agent 结构化产出 satisfied/needs_revision/failed，
@@ -394,7 +415,10 @@ def create_main_agent(
         user_id=user_context.user_id,
         username=user_context.username,
         preferences=str(user_context.preferences) if user_context.preferences else "无特殊偏好",
+        warm_memory=user_context.warm_memory or "（暂无跨会话记忆）",
     )
+    if DEFAULT_MEMORY_CONFIG.memory_tools_enabled:
+        system_prompt += MEMORY_USAGE_PROMPT
     # 注入子Agent委派上下文协议
     if delegation_prompt:
         system_prompt += delegation_prompt

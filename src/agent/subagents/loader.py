@@ -208,14 +208,33 @@ def resolve_subagent_tools(configs: list[dict], all_tools: list[BaseTool]) -> li
         
         # 存储匹配到的实际工具对象
         matched_tools = []
-        
+
         # 遍历每个工具模式字符串
         for pattern in tool_patterns:
-            # 遍历所有可用工具
-            for tool in all_tools:
-                # 检查模式字符串是否包含在工具名称中（子串匹配）
-                # 且该工具尚未被添加（避免重复）
-                if pattern in tool.name and tool not in matched_tools:
+            pattern_name = str(pattern or "").strip()
+            if not pattern_name:
+                continue
+
+            # 匹配优先级：精确 > 分组前缀（order -> order_create）> 子串（旧行为兜底）
+            # 直接用子串会让 "order" 命中 "reorder_item" 这类意外包含该片段的工具，
+            # 导致子Agent 拿到不该有的写权限，因此收敛为按 _ 边界的前缀匹配。
+            hits = [t for t in all_tools if getattr(t, "name", "") == pattern_name]
+            if not hits:
+                hits = [
+                    t for t in all_tools
+                    if str(getattr(t, "name", "")).startswith(pattern_name + "_")
+                ]
+            if not hits:
+                hits = [t for t in all_tools if pattern_name in str(getattr(t, "name", ""))]
+
+            if not hits:
+                agent_logger.warning(
+                    f"Subagent '{config.get('name')}' tool pattern '{pattern_name}' "
+                    f"matched no tool"
+                )
+
+            for tool in hits:
+                if tool not in matched_tools:
                     matched_tools.append(tool)
         
         # 解析 interrupt_on 配置

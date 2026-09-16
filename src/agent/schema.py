@@ -25,6 +25,7 @@ class ProcurementContext(BaseModel):
     user_id: str = Field(default="default_user", description="用户ID")
     username: str = Field(default="用户", description="用户名")
     preferences: dict = Field(default_factory=dict, description="用户偏好字典")
+    warm_memory: str = Field(default="", description="WARM 层记忆摘要（语义记忆 + 近期情节），注入系统提示词")
     session_start: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 

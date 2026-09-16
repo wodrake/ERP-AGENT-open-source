@@ -20,6 +20,48 @@ from langgraph.store.base import BaseStore, Item, Op
 from ..agent.log_utils import web_logger
 
 
+def _to_datetime(value: Any) -> datetime:
+    """把 ISO 字符串还原成 datetime；解析不了就用当前时间兜底。"""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return datetime.now()
+
+
+def _make_item(
+    namespace: tuple[str, ...],
+    key: str,
+    value: Any,
+    created_at: Any = None,
+    updated_at: Any = None,
+) -> Item:
+    """构造 Item，兼容不同 langgraph 版本的字段要求。
+
+    langgraph >= 1.2 的 ``Item`` 把 created_at / updated_at 设成了**必填**
+    关键字参数，旧写法 ``Item(namespace=..., key=..., value=...)`` 会抛
+    TypeError。而这个异常大多被上层 try/except 吞掉，表现就是"功能看起来
+    在跑，但偏好和技能从来没真正落盘"。这里按版本自适应构造，彻底修掉。
+    """
+    kwargs = {
+        "namespace": tuple(namespace),
+        "key": key,
+        "value": value,
+    }
+    try:
+        return Item(
+            created_at=_to_datetime(created_at),
+            updated_at=_to_datetime(updated_at),
+            **kwargs,
+        )
+    except TypeError:
+        # 旧版 langgraph 的 Item 不接受时间戳字段
+        return Item(**kwargs)
+
+
 class MongoDBStore(BaseStore):
     """
     MongoDB 持久化 Store
@@ -75,15 +117,7 @@ class MongoDBStore(BaseStore):
         """写入/更新存储项"""
         doc_id = self._namespace_key(namespace, key)
         now = datetime.now().isoformat()
-
-        doc = {
-            "_id": doc_id,
-            "namespace": list(namespace),
-            "key": key,
-            "value": self._serialize_value(value),
-            "created_at": now,
-            "updated_at": now,
-        }
+        serialized = self._serialize_value(value)
 
         # Upsert（保留 created_at）
         self._collection.update_one(
@@ -92,7 +126,7 @@ class MongoDBStore(BaseStore):
                 "$set": {
                     "namespace": list(namespace),
                     "key": key,
-                    "value": self._serialize_value(value),
+                    "value": serialized,
                     "updated_at": now,
                 },
                 "$setOnInsert": {"created_at": now},
@@ -100,30 +134,34 @@ class MongoDBStore(BaseStore):
             upsert=True,
         )
 
-        return Item(
-            namespace=namespace,
-            key=key,
-            value=value,
-        )
+        return _make_item(namespace, key, value, now, now)
 
     def search(
         self,
         namespace_prefix: tuple[str, ...],
         *,
+        query: Optional[str] = None,
         filter: Optional[dict] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Item]:
-        """搜索存储项（按 namespace 前缀匹配）"""
-        query = self._namespace_prefix_query(namespace_prefix)
+        """搜索存储项（按 namespace 前缀匹配）
+
+        ``query`` 是为兼容 LangGraph BaseStore 的语义检索签名而接受的。
+        本实现没有配置向量索引，语义检索由上层 ``MemoryKeeper`` 用 BM25 完成，
+        因此这里对 ``query`` 不做过滤（只在日志层面忽略），避免上层调用报 TypeError。
+        若后续接入 Atlas Vector Search，可在此处把 query 转成 ``$vectorSearch``。
+        """
+        mongo_query = self._namespace_prefix_query(namespace_prefix)
+        del query  # 未启用向量索引，保留参数只为接口兼容
 
         if filter:
             # 简单值过滤
             for k, v in filter.items():
-                query[f"value.{k}"] = v
+                mongo_query[f"value.{k}"] = v
 
         cursor = (
-            self._collection.find(query)
+            self._collection.find(mongo_query)
             .sort("updated_at", -1)
             .skip(offset)
             .limit(limit)
@@ -231,10 +269,12 @@ class MongoDBStore(BaseStore):
     def _doc_to_item(doc: dict) -> Item:
         """将 MongoDB 文档转为 Item"""
         namespace = tuple(doc.get("namespace", []))
-        return Item(
-            namespace=namespace,
-            key=doc.get("key", ""),
-            value=doc.get("value"),
+        return _make_item(
+            namespace,
+            doc.get("key", ""),
+            doc.get("value"),
+            doc.get("created_at"),
+            doc.get("updated_at"),
         )
 
     @staticmethod

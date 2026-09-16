@@ -18,6 +18,20 @@
 
 ---
 
+## 2026-09-17 更新
+
+本次新增三层记忆并修复其主链路集成问题，保留原有按需 Grader、用户级沙箱、Skills 恢复及双层 HITL 能力。
+
+- **三层记忆**：HOT 使用会话状态与 checkpoint；WARM 在每次模型调用前动态读取当前用户的偏好和近期情节摘要；COLD 由 `read_memory` 按需检索。新增 `remember` 显式写入工具。
+- **记忆治理**：统一 `MemoryKeeper` 管理语义、情节、程序记忆，支持偏好合并、版本失效标记、TTL 清理和数量淘汰。统一入口不等同于数据库事务或分布式并发保证。
+- **修复跨会话覆盖**：从 LangGraph 运行配置获取 `thread_id`；缺少 ID 时跳过归档，避免所有会话写入 `ep_unknown`。
+- **修复记忆不刷新**：新增 `WarmMemoryMiddleware`，即使 Agent Session 已缓存也会刷新记忆，单次注入摘要最多 4000 字符（不是 token）。异步调用通过线程执行同步 Store 读取。
+- **修复配置及抽取**：加载 `.env` 中的记忆配置，接通可选 LLM 抽取与规则回退；默认仍关闭额外模型抽取。只处理最新用户轮次，并跳过规则能识别的否定、明确临时表达，减少旧消息反复覆盖偏好。
+- **其他兼容修复**：MongoDBStore 构造 Item 时提供时间戳；子 Agent 工具匹配改为精确优先、下划线前缀其次、子串兜底，未匹配时告警。子串兜底仍有权限误匹配风险。
+- **验证**：34 项记忆基础测试和 8 项真实 LangGraph 离线集成测试通过。模型使用测试替身、存储使用内存替身，不代表真实 Docker、MongoDB 和外部 API 全链路已验证。
+
+本机 WSL 启动与回退见 [WSL_START.md](WSL_START.md)。修复前标签为 `memory-before-fixes-20260917`，核心修复标签为 `memory-fixed-20260917`；文档更新可能晚于该标签。版本回退不回滚数据库内容，旧 `ep_unknown` 已覆盖的数据也不会自动恢复。
+
 ## 技术栈
 
 | 层级 | 技术 | 说明 |
@@ -56,7 +70,7 @@
 │  │          │ │ (Docker+Store)│ │ 框架内置)    │ │ order      │ │
 │  └──────────┘ └───────────────┘ └─────────────┘ └────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │ Tools: 23 MCP + 10 Custom = 33 个工具                        ││
+│  │ Tools: 23 MCP + 12 Custom = 35 个显式工具（默认）             ││
 │  │ chart(26种) + web_search + web_fetch + install_skill         ││
 │  │ + hitl_tools + download_sandbox_file + document_generator    ││
 │  └─────────────────────────────────────────────────────────────┘│
@@ -122,6 +136,7 @@ Agent 严格遵循四阶段工作流：
 | 1 | SandboxHealthMiddleware | 沙箱健康检查 + 自动重连 |
 | 2 | HarnessPhaseMiddleware | 阶段状态机 + 按需 rubric |
 | 3 | ContextInjectionMiddleware | 用户上下文注入（工厂模式隔离） |
+| 3.5 | WarmMemoryMiddleware | 每次模型调用动态读取当前用户记忆，摘要上限 4000 字符 |
 | 4 | SkillsSyncMiddleware | 技能文件夹级增量同步 |
 | 5 | UserSkillsRestoreMiddleware | 用户自定义技能恢复 |
 | 6 | ToolsSummarizationMiddleware | 工具调用摘要监控 |
@@ -132,30 +147,30 @@ Agent 严格遵循四阶段工作流：
 | 11 | ModelCallLimitMiddleware | 模型调用次数限制 |
 | 12 | ToolCallLimitMiddleware | 工具调用次数限制 |
 
-### 7. 33 个工具
+### 7. 默认 35 个显式注册工具
 - **23 个 MCP 工具**：供应商(5) + 零部件(5) + 订单(7) + 库存(6)
 - **10 个自定义工具**：chart_generator, web_search, web_fetch, install_skill, list_user_skills, request_order_info, download_sandbox_file, list_sandbox_files, generate_document, generate_table_report
+- **2 个记忆工具**：read_memory、remember；`MEMORY_TOOLS_ENABLED=false` 时不注册。
+
+以上不包含 DeepAgents 自动提供的文件、执行、规划和委派工具，实际可用工具还取决于 MCP 连接与框架配置。
 
 ---
 
 ## 三层记忆架构（HOT / WARM / COLD）
 
-记忆分三层，每层有独立的介质、检索路径和生命周期，本质是把 CPU 缓存分层
-（L1/L2/磁盘）映射到 Agent 上：
+三层按访问方式与上下文用途划分，不是三个独立数据库，也不是严格的缓存逐级淘汰协议：
 
 | 层 | 内容 | 介质 | 体积目标 | 策略 |
 |---|---|---|---|---|
-| **HOT** | 当前会话消息、工具结果、活跃 todo | LangGraph Checkpointer（MongoDB） | — | 会话结束即压实下沉 |
-| **WARM** | 用户稳定偏好、近 7 天情节摘要 | MongoDBStore，常驻注入 system_prompt | 1–3K token | 变更才更新，永不随意裁剪 |
-| **COLD** | 全部历史情节、程序记忆 | MongoDBStore，按需检索 | 无上限 | BM25 + 时间衰减检索 top-k |
+| **HOT** | 当前会话消息、工具结果、活跃 todo | LangGraph 状态及 Checkpointer（MongoDB） | 由框架管理 | checkpoint 用于恢复；归档不会自动删除原消息 |
+| **WARM** | 有效语义记忆、近 7 天情节摘要（默认最多 5 条） | MongoDBStore 中的记录，动态注入 system prompt | 摘要最多 4000 字符 | 每次模型调用重新读取，超长截断 |
+| **COLD** | 持久化历史情节、程序记忆等 | MongoDBStore，按需检索 | 情节默认最多 200 条，保留 90 天 | BM25 加权排序后返回 top-k，过期清理按调用触发 |
 
 ### 记忆类型
 
-沿用认知科学的三分类，与业界共识（Mem0 / Zep / Letta / LangMem）一致：
+记忆内容按用途分为三类：
 
-- **语义记忆 semantic**：用户偏好等稳定事实，带**双时态**
-  （`valid_from` / `invalidated_at`）——用户"改口"时旧值不删除，而是标记失效沉入 COLD，
-  既保证当前取值唯一正确，又保留可追溯的历史
+- **语义记忆 semantic**：用户偏好等稳定事实，记录生效、失效时间及版本关系。用户改口时旧值标记失效，按历史保留策略清理；这不是完整的双时态数据库。普通检索只返回有效记录，旧值需通过历史查询接口检查。
 - **情节记忆 episodic**：每次会话归档一条（`ep_<thread_id>`，幂等），
   90 天后遗忘，7 天后从 WARM 下沉到 COLD
 - **程序记忆 procedural**：经验与流程，按需检索，不做无脑注入
@@ -166,36 +181,37 @@ Agent 严格遵循四阶段工作流：
 ("memories", <user_id>, "semantic")     用户级稳定事实
 ("memories", <user_id>, "episodic")     用户级情节归档
 ("memories", <user_id>, "procedural")   用户级经验/流程
-("memories", "org",     "policies")     组织级只读策略
+("memories", "org",     "policies")     预留组织策略命名空间，未接入主链路
 ("user-preferences", <user_id>)         WARM 投影（偏好字典缓存，供提示词注入）
 ```
 
 `user-preferences` 命名空间保留但**语义变了**：它不再是记忆本体，而是 WARM 层
-的一份单向投影，由 `MemoryKeeper` 同步，真正的本体在 `memories` 下。
+的一份兼容投影；自动偏好合并会同步写入语义记录，旧数据支持迁移。`remember` 直接写记忆本体，不保证更新这份投影；动态 WARM 注入以记忆本体为准。
 
 ### 关键实现
 
 | 文件 | 职责 |
 |---|---|
-| `src/agent/memory/types.py` | 记忆条目模型（双时态、溯源、生命周期） |
+| `src/agent/memory/types.py` | 记忆条目模型（生效失效时间、溯源、生命周期） |
 | `src/agent/memory/keeper.py` | **唯一写入口**：合并、冲突消解、检索、遗忘 |
 | `src/agent/memory/scoring.py` | COLD 检索打分（BM25 + 时间衰减 + 频次 + 置信度） |
 | `src/agent/memory/extractor.py` | 偏好抽取与情节摘要（默认零 LLM 调用） |
 | `middlewares/memory_update.py` | WARM 层偏好写入 |
 | `middlewares/memory_consolidation.py` | 情节归档 + 遗忘扫描（按间隔节流） |
+| `middlewares/warm_memory.py` | 动态加载 WARM 摘要及长度限制 |
+| `src/agent/memory/run_config.py` | 从当前图运行配置读取会话 ID |
 | `tools/memory_tools.py` | `read_memory` / `remember`，COLD 层按需取用 |
 
-设计约束：**所有记忆读写只经过 `MemoryKeeper` 一个出口**，避免多个写入方互相覆盖；
-整合与遗忘**不调用 LLM**且全流程吞异常，延迟和稳定性都不受影响。
+新记忆的读写逻辑集中在 `MemoryKeeper`，便于统一合并与生命周期策略，但没有实现跨记录事务。情节归档采用规则截取而非 LLM 总结，遗忘按用户节流、在执行结束时触发，不是独立后台任务。Store I/O 仍有成本；异常按降级策略处理，不应描述为“零延迟”。当前每类记录检索最多读取 500 条，规模扩大后需补分页、索引与并发一致性机制。
 
 ### 验证
 
 ```bash
 python -m src.test.test_memory_layer
+python -m unittest src.test.test_memory_integration -v
 ```
 
-不依赖 MongoDB / Docker / DeepSeek / langchain，用内存假 Store 跑，
-覆盖偏好合并、冲突消解、分层下沉、遗忘、检索排序与容错共 32 个用例。
+基础套件 34 项；缺少框架依赖时其中集成部分会跳过。新增 8 项集成测试要求安装项目 Python 依赖，使用真实 LangGraph、模拟模型和内存 Store，覆盖不同会话独立归档、同步与异步注入、用户隔离、配置、否定表达、旧消息和失败降级。两套均不需要真实模型 Key、MongoDB 或 Docker。
 
 ---
 
@@ -227,7 +243,7 @@ ERP-AGENT/
 │   │   │   ├── sandbox_proxy.py       # 代理层（热替换）
 │   │   │   └── seccomp.json           # seccomp 安全策略
 │   │   ├── middlewares/               # 自定义中间件
-│   │   ├── tools/                     # 10 个自定义工具
+│   │   ├── tools/                     # 10 个基础自定义工具 + 2 个记忆工具
 │   │   │   ├── document_generator.py  # 文档生成（MD/HTML/CSV/JSON）
 │   │   │   ├── download_sandbox_file.py # 沙箱文件下载
 │   │   │   ├── chart_generator.py     # 26 种图表
@@ -414,15 +430,10 @@ Agent 不直接调用 ERP API，而是通过 MCP Server 提供的 23 个标准�
 文件夹级技能管理（SKILL.md + 脚本 + 依赖），支持安装/同步/恢复。SkillsSyncMiddleware 实现增量同步（SHA256 哈希比对），保留完整目录结构。
 
 ### 11. 三层记忆治理（HOT / WARM / COLD）
-不是"能存就算有记忆"，而是完整的分层治理：语义 / 情节 / 程序三类型分离、
-命名空间规范化、**双时态冲突消解**（用户改口时旧值标记失效而非覆盖）、
-异步整合（会话结束自动归档情节）、**可配置的遗忘策略**（TTL + 超量淘汰 + 衰减）。
-所有读写收敛到单一出口 `MemoryKeeper`，消除多方写入互相覆盖的隐患。
+语义、情节、程序记忆分别建模，通过用户命名空间隔离。MemoryKeeper 集中处理偏好合并、旧版本失效、情节归档、TTL 和数量清理；时间衰减用于检索排序，不等同于删除。并发事务与大规模存储优化仍是后续工作。
 
 ### 12. 上下文经济
-COLD 层历史**不进系统提示词**，由 `read_memory` 工具按需检索
-（BM25 + 时间衰减 + 引用频次 + 置信度加权），WARM 层常驻内容控制在 1–3K token；
-偏好抽取走确定性规则，**零额外 LLM 调用**。用更少的 token 拿到更相关的上下文。
+WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务与程序记忆由 `read_memory` 按需检索，采用 BM25、时间衰减、引用频次和置信度加权。默认偏好抽取使用规则，不额外调用 LLM；开启 `MEMORY_LLM_EXTRACTION` 后会增加模型调用成本。尚未测量真实任务的 token 节省比例。
 
 ---
 

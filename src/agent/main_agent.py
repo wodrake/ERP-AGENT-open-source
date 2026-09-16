@@ -350,6 +350,7 @@ def create_main_agent(
     from .middlewares.tools_summarization import ToolsSummarizationMiddleware
     from .middlewares.memory_update import MemoryUpdateMiddleware
     from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
+    from .middlewares.warm_memory import WarmMemoryMiddleware, WARM_MEMORY_SLOT
     from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
     # Harness 阶段状态机 + 评审器（真 Harness 架构核心）
     from .harness import HarnessPhaseMiddleware, load_harness_config
@@ -395,6 +396,7 @@ def create_main_agent(
         ),                                                            # 1. 沙箱健康检查 + 重建
         HarnessPhaseMiddleware(),                                     # 2. 阶段状态机 + rubric 注入
         ContextInjectionMiddleware(user_context=user_context),        # 3. 用户上下文注入
+        WarmMemoryMiddleware(store=store, user_id=user_context.user_id),
         skills_sync_middleware,                                       # 4. 基础 Skills 同步
         user_skills_restore_middleware,                               # 5. 用户 Skills 恢复
         ToolsSummarizationMiddleware(),                               # 6. 摘要监控
@@ -414,8 +416,8 @@ def create_main_agent(
     system_prompt = MAIN_SYSTEM_PROMPT.format(
         user_id=user_context.user_id,
         username=user_context.username,
-        preferences=str(user_context.preferences) if user_context.preferences else "无特殊偏好",
-        warm_memory=user_context.warm_memory or "（暂无跨会话记忆）",
+        preferences="以本次动态加载的记忆为准",
+        warm_memory=WARM_MEMORY_SLOT,
     )
     if DEFAULT_MEMORY_CONFIG.memory_tools_enabled:
         system_prompt += MEMORY_USAGE_PROMPT

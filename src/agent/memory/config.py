@@ -94,4 +94,12 @@ class MemoryConfig:
         )
 
 
-DEFAULT_MEMORY_CONFIG = MemoryConfig()
+# Load .env when the optional application dependency is installed; the pure
+# memory unit tests can still run with only the standard library.
+try:
+    from .. import env_utils as _env_utils
+except ModuleNotFoundError as exc:
+    if exc.name != "dotenv":
+        raise
+
+DEFAULT_MEMORY_CONFIG = MemoryConfig.from_env()

@@ -17,6 +17,7 @@ from langchain.agents.middleware import AgentMiddleware, Runtime
 from ..log_utils import middleware_logger
 from ..memory.config import DEFAULT_MEMORY_CONFIG, MemoryConfig
 from ..memory.keeper import MemoryKeeper
+from ..memory.run_config import current_thread_id
 
 
 class MemoryConsolidationMiddleware(AgentMiddleware):
@@ -48,7 +49,9 @@ class MemoryConsolidationMiddleware(AgentMiddleware):
             from ..memory.extractor import summarize_episode
 
             digest = summarize_episode(messages, self._config, thread_id=thread_id)
-            if digest and digest.get("summary"):
+            # Without a stable conversation ID, skip the archive rather than
+            # overwrite every conversation with an ep_unknown record.
+            if thread_id and digest and digest.get("summary"):
                 keeper.archive_episode(
                     thread_id or digest.get("thread_id") or "unknown",
                     goal=digest.get("goal", ""),
@@ -76,10 +79,4 @@ class MemoryConsolidationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _thread_id(runtime: Runtime) -> str:
-        try:
-            config = runtime.config if hasattr(runtime, "config") else {}
-            if isinstance(config, dict):
-                return config.get("configurable", {}).get("thread_id", "")
-        except Exception:
-            pass
-        return ""
+        return current_thread_id(runtime)

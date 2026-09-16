@@ -121,10 +121,17 @@ def _pick(text: str, table: Dict[str, str], *, require_trigger: bool) -> Optiona
         return None
     if not explicit and not _has_imperative(text):
         return None
-    for keyword in sorted(table, key=len, reverse=True):
-        if keyword in text:
-            return table[keyword]
-    return None
+    selected = None
+    # Prefer the last affirmative clause; do not turn a rejection into a
+    # positive preference. Ambiguous / temporary instructions are not stored.
+    for clause in re.split(r"[，。；！？,;!?]|改成|改为|换成", text):
+        if re.search(r"不要|别用|不用|不想|不喜欢|不再|不能|无需|这次|本次|临时|仅此|don't|do not", clause):
+            continue
+        for keyword in sorted(table, key=len, reverse=True):
+            if keyword in clause:
+                selected = table[keyword]
+                break
+    return selected
 
 
 def _extract_supplier_names(text: str) -> List[str]:

@@ -23,8 +23,9 @@
 
 旧版：`/home/administrator/projects/ERP-AGENT`，未覆盖，原有未提交改动保留。
 
-新版复制了旧版 .env（不加入 Git），通过 .venv 和 frontend/node_modules 符号链接复用旧版依赖。
-暂时不要删除旧目录，也不要在共享环境里升级依赖。要独立部署时请新建虚拟环境并安装 requirements.txt，前端执行 npm ci。
+新版复制了旧版 .env（不加入 Git），Python 的 .venv 仍通过符号链接复用旧版环境。
+前端 node_modules 已改为新版目录内的独立实体目录，不再链接到旧项目；Turbopack 会拒绝指向项目根目录之外的 node_modules。迁移时确认了两份 package-lock.json 一致，再复制已有依赖；全新安装请执行 npm ci。
+暂时不要删除旧目录，也不要在共享 Python 环境里升级依赖。要完全独立部署时请新建虚拟环境并安装 requirements.txt。
 
 ## 启动前
 
@@ -54,6 +55,8 @@ cd ~/projects/ERP-AGENT-open-source
 
 ```bash
 cd ~/projects/ERP-AGENT-open-source/frontend
+source ~/.nvm/nvm.sh
+nvm use 22
 npm run dev
 ```
 

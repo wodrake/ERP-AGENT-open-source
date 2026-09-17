@@ -12,7 +12,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN" className="h-full antialiased">
+    // Browser extensions may add attributes to <html> before hydration (for
+    // example Immersive Translate). Suppress only this root-level mismatch;
+    // keep hydration checks enabled for application content below it.
+    <html lang="zh-CN" className="h-full antialiased" suppressHydrationWarning>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

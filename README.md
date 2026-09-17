@@ -98,7 +98,26 @@ Agent 严格遵循四阶段工作流：
 - **Review**：按需审查执行结果，验证数据完整性（问候、感谢和纯概念问答默认跳过 grader；查询、分析、下单等业务任务自动启用）
 - **Result**：结构化输出最终结果
 
-审查策略配置在 `src/agent/harness_config.yaml` 的 `review.mode`：`auto`（默认）、`always` 或 `never`。判断过程只使用本地规则，不会为了决定是否审查而额外调用一次模型。
+审查策略配置在 `src/agent/harness_config.yaml`。`review.mode` 支持 `auto`（默认）、`always` 和 `never`；`review.strategy` 默认 `hybrid`，也可切换为 `rules` 保留纯规则入口。
+
+#### 混合审查路由
+
+- 明确问候、单一概念定义且没有待办任务时直接跳过；明确复核、业务处理或写操作请求由规则触发。
+- 模糊请求使用独立 DeepSeek 路由调用，输入最近 6 条截断消息及计划、待办摘要，输出 `skip/review/uncertain`、任务类型、简短理由和受限检查项。与主对话共用现有 Key，关闭思考，最多输出 400 token，不自动重试；异步总等待默认 8 秒，HTTP 请求也设置超时。
+- 每次图调用只在入口路由一次，不因 Grader 重做重复路由；超时、格式不合法或 uncertain 保守进入评审。此调用有额外成本，不计入主 Agent 的 ModelCallLimit，单独以次数、超时及输出上限约束。
+- 执行结束、Grader 运行前再次检查本轮工具记录：工具错误、多工具/多来源调用、写操作与子任务委派可以升级原先的免审决定。当前是保守信号规则，不宣称能够自动识别所有事实冲突。
+- 固定业务底线不可由路由模型改写，模型只选择预定义的计算、来源、约束、比较、产物检查项。图表和完整报告不再作为所有分析任务的强制交付物。
+- 调用写入、执行类工具，或委派可能隐藏写操作的子任务后，只进行单轮 Grader 评审，失败不自动重放整轮任务。只读任务保留有限次修改重审。这是评审循环防重放，不代替业务幂等和执行前 HITL。
+- `never` 明确关闭自动评审（执行信号也不升级），但不关闭 HITL；调用方显式传入 rubric 时保留其评审标准。
+- `review_decision` 保存判断来源和升级信号，写入 Harness trace；内部路由模型输出不作为前端回答流发送。
+
+修改配置后重启后端。需要快速对照旧规则时设置 `strategy: rules`；执行信号升级仍保留。
+
+```bash
+python -m unittest src.test.test_hybrid_review -v
+```
+
+新增 15 项回归测试，覆盖模型路由、超时降级、执行升级、跨轮状态清理、HITL 恢复、写操作防重放和只读任务有限重审。
 
 ### 2. Docker 安全沙箱（7 层防护）
 ```
@@ -134,7 +153,7 @@ Agent 严格遵循四阶段工作流：
 | # | 中间件 | 职责 |
 |---|--------|------|
 | 1 | SandboxHealthMiddleware | 沙箱健康检查 + 自动重连 |
-| 2 | HarnessPhaseMiddleware | 阶段状态机 + 按需 rubric |
+| 2 | HarnessPhaseMiddleware | 阶段状态机 + 规则与模型混合路由 |
 | 3 | ContextInjectionMiddleware | 用户上下文注入（工厂模式隔离） |
 | 3.5 | WarmMemoryMiddleware | 每次模型调用动态读取当前用户记忆，摘要上限 4000 字符 |
 | 4 | SkillsSyncMiddleware | 技能文件夹级增量同步 |
@@ -143,7 +162,8 @@ Agent 严格遵循四阶段工作流：
 | 7 | MemoryUpdateMiddleware | 用户偏好自动提取与合并（WARM 层） |
 | 8 | MemoryConsolidationMiddleware | 情节归档 + 遗忘扫描（COLD 层） |
 | 9 | SandboxCircuitBreakerMiddleware | 沙箱熔断器（三态模型） |
-| 10 | RubricMiddleware | 复杂任务结果审查与有限次重做 |
+| 10 | SafeRubricMiddleware | 基于框架 RubricMiddleware 审查；写操作后禁止自动重放 |
+| 10.5 | ReviewExecutionGate | 根据本轮工具记录升级评审，after_agent 逆序下先于 Grader 执行 |
 | 11 | ModelCallLimitMiddleware | 模型调用次数限制 |
 | 12 | ToolCallLimitMiddleware | 工具调用次数限制 |
 

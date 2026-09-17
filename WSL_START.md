@@ -1,5 +1,14 @@
 # WSL 修复版启动与回退
 
+## 混合审查更新
+
+当前默认使用 `review.strategy: hybrid`：明确场景按规则判断，模糊请求调用现有 DeepSeek 模型，执行记录可升级审查。无需新增 Key；模糊请求会增加一次有超时限制的路由调用。修改 `src/agent/harness_config.yaml` 后重启后端生效。
+
+可测试“你好”“什么是库存，请查询缺货零件”“沿用刚才的方案，把第二家的量翻倍”。检查日志 Review route 与 Harness trace 中的 review_decision。订单写入仍须审批；写工具或子任务委派后评审未通过，不自动重放整轮任务。
+
+离线回归：`.venv/bin/python -m unittest src.test.test_hybrid_review -v`。
+本次修改前代码标签为 `review-before-hybrid-20260917`，可用独立 git worktree 对照；不要使用硬重置覆盖本地改动。
+
 ## 本次修复
 
 - 从真实 LangGraph 配置读取 thread_id，缺少 ID 时跳过归档，避免 ep_unknown 覆盖历史。

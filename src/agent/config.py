@@ -15,7 +15,8 @@ LLM_MAX_TOKENS = 4096
 LLM_REASONING_EFFORT = get_env("LLM_REASONING_EFFORT", "high")
 
 
-def get_llm(*, thinking: bool = True) -> ChatDeepSeek:
+def get_llm(*, thinking: bool = True, timeout: float | None = None,
+            max_retries: int = 2, max_tokens: int = LLM_MAX_TOKENS) -> ChatDeepSeek:
     """获取 DeepSeek 模型实例。
 
     主 Agent 使用思考模式；需要强制结构化输出的内部评审器使用
@@ -25,9 +26,11 @@ def get_llm(*, thinking: bool = True) -> ChatDeepSeek:
         "model": LLM_MODEL,
         "base_url": LLM_BASE_URL,
         "api_key": LLM_API_KEY,
-        "max_tokens": LLM_MAX_TOKENS,
-        "max_retries": 2,
+        "max_tokens": max_tokens,
+        "max_retries": max_retries,
     }
+    if timeout is not None:
+        common_kwargs["timeout"] = timeout
     if thinking:
         return ChatDeepSeek(
             **common_kwargs,

@@ -52,6 +52,11 @@ class HarnessPhaseState(AgentState):
     _harness_rubric_source: NotRequired[Annotated[str, PrivateStateAttr]]
     """记录 rubric 是否由本中间件自动注入，用于跨 checkpoint 清理旧 rubric。"""
 
+    review_decision: NotRequired[dict]
+    _review_start: NotRequired[Annotated[int, PrivateStateAttr]]
+    _review_write_attempted: NotRequired[Annotated[bool, PrivateStateAttr]]
+    _review_signals: NotRequired[Annotated[list[str], PrivateStateAttr]]
+
 
 # 配置缺失时的兜底（避免文件缺失导致整个 Agent 启动失败）
 _DEFAULT_CONFIG: dict[str, Any] = {
@@ -186,7 +191,7 @@ def should_use_grader(messages: list[Any] | None, config: dict[str, Any]) -> boo
 
     # 纯概念解释不需要访问 ERP 数据，也不必为它额外启动 grader；带有
     # “查询/分析/生成”等动作的长请求仍会在下面的触发规则中进入审查。
-    if _DEFINITION_PATTERN.fullmatch(text):
+    if re.fullmatch(r"(?:什么是[\w]{1,12}|[\w]{1,12}是什么)[？?。\s]*", text):
         return False
 
     configured_keywords = review_config.get("trigger_keywords")
@@ -260,8 +265,10 @@ class HarnessPhaseMiddleware(AgentMiddleware):
 
     state_schema = HarnessPhaseState
 
-    def __init__(self, config_path: Path | None = None):
+    def __init__(self, config_path: Path | None = None, router_model=None):
         self._config = load_harness_config(config_path)
+        from .review_policy import ReviewPolicy
+        self._review_policy = ReviewPolicy(self._config, router_model)
         self.tools = []
 
     @property
@@ -275,38 +282,10 @@ class HarnessPhaseMiddleware(AgentMiddleware):
         才会调用 grader。这里不再无条件注入 default rubric，因此“你好”等
         简单请求不会产生额外的审查模型调用。
         """
-        updates: dict[str, Any] = {"phase": Phase.planning.value}
+        return {"phase": Phase.planning.value, **self._review_policy.start(state)}
 
-        messages = state.get("messages", [])
-        needs_grader = should_use_grader(messages, self._config)
-        current_rubric = state.get("rubric")
-        rubric_source = state.get("_harness_rubric_source")
-
-        # 没有来源标记且没有 RubricMiddleware 的 active run 时，视为调用方
-        # 显式传入的 rubric，继续尊重外部评审标准。
-        explicit_rubric = bool(current_rubric) and not rubric_source and not state.get("_active_rubric")
-        if explicit_rubric:
-            agent_logger.debug("Explicit rubric provided, skip auto-selection")
-            return updates
-
-        if not needs_grader:
-            # 清空上一个请求遗留的自动 rubric。否则 checkpoint 中的 rubric
-            # 会让下一次简单请求继续触发 grader。
-            if current_rubric or rubric_source == "auto":
-                updates["rubric"] = ""
-                updates["_harness_rubric_source"] = ""
-                updates["review_result"] = None
-                agent_logger.info("Harness grader skipped for simple request")
-            return updates
-
-        task_type = detect_task_type(messages, self._config)
-        rubric = build_rubric(task_type, self._config)
-        if rubric:
-            updates["rubric"] = rubric
-            updates["_harness_rubric_source"] = "auto"
-            agent_logger.info(f"Harness rubric injected (task_type={task_type})")
-
-        return updates
+    async def abefore_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+        return {"phase": Phase.planning.value, **await self._review_policy.astart(state)}
 
     def after_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """模型返回后：跟踪阶段 + 同步结构化 plan。

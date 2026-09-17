@@ -82,6 +82,7 @@ async def stream_chat_response(
     phase = "thinking"  # 当前阶段: thinking → planning → executing → reviewing → result
     last_phase = "thinking"  # 上次已发射的阶段（去重）
     last_todos_sig = None  # 上次已发射的 todo 列表签名（去重）
+    last_review_sig = None
     harness_trace: list = []  # Harness 阶段流转 trace（P3 可观测）
 
     # 同一用户的整个流串行运行，避免两个会话同时覆盖 /tmp、/workspace 中的文件。
@@ -108,6 +109,13 @@ async def stream_chat_response(
             # ===== 中断检测 + 结构化 Harness 状态读取（必须在 messages 处理之前）=====
             if chunk_type == "values":
                 if isinstance(chunk, dict):
+                    if not namespace and chunk.get("review_decision"):
+                        decision = chunk["review_decision"]
+                        signature = json.dumps(decision, ensure_ascii=False, sort_keys=True)
+                        if signature != last_review_sig:
+                            last_review_sig = signature
+                            harness_trace.append({"type": "review_decision", **decision,
+                                                  "timestamp": datetime.now().isoformat()})
                     # --- 结构化阶段流转（来自 HarnessPhaseMiddleware 写入的 state.phase）---
                     new_phase = chunk.get("phase")
                     if new_phase and new_phase != last_phase:
@@ -221,6 +229,11 @@ async def stream_chat_response(
 
             # ===== Messages 流处理 =====
             if chunk_type == "messages":
+                # Routing output is internal control data, never assistant text
+                # or a user-visible tool invocation.
+                metadata = chunk[1] if isinstance(chunk, (tuple, list)) and len(chunk) > 1 else {}
+                if isinstance(metadata, dict) and "review_router" in (metadata.get("tags") or []):
+                    continue
                 # chunk 格式: (message_chunk, metadata_dict)
                 if isinstance(chunk, (list, tuple)) and len(chunk) >= 1:
                     token = chunk[0]

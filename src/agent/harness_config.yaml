@@ -19,6 +19,8 @@ phases:
 review:
   mode: auto                 # auto / always / never；auto 对简单对话跳过 grader
   strategy: hybrid           # hybrid：明确场景规则，模糊场景模型；rules：兼容本地规则
+  router_provider: deepseek   # deepseek / jev；REVIEW_ROUTER_PROVIDER 环境变量优先
+  jev_min_confidence: 0.0     # 首版不额外调整置信阈值；只能在开发集调优，不在测试集调参
   router_timeout_seconds: 8  # 路由超时保守审查；独立调用最多一次，不自动重试
   max_iterations: 3          # 单次 rubric 最多评审迭代次数
   model: null                # 使用主 LLM；可覆盖为 provider:model

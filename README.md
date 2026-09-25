@@ -491,3 +491,4 @@ WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务
 - 添加新工具：在 `src/agent/tools/` 创建工具文件，在 `main_agent.py` 注册
 - 添加新中间件：在 `src/agent/middlewares/` 创建，在 `main_agent.py` 中间件栈中添加
 - 修改子Agent：编辑 `src/agent/subagents/configs/*.yaml`
+> **2026-09-25 审查路由实验**：新增可切换的 JEV 结构化路由适配器，以及 200 条合成样本的真实 API 配对评测。首轮测试不支持替换默认 DeepSeek；没有宣称线上准确率提升。接入、复现和边界见 [评测说明](evals/review_routing/README.md)，数据见 [完整报告](evals/review_routing/results/paired-v1/REPORT.md)，决策见 [结论](evals/review_routing/FINDINGS.md)。

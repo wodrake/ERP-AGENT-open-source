@@ -1,0 +1,304 @@
+{
+  "manifest": {
+    "dataset_sha256": "efbac97f3d21d15764e7e88e6d7c5c54dcaf6c9c99bcad623586c0436ad8d5d8",
+    "sample_ids": [
+      "skip-thanks-3",
+      "skip-thanks-4"
+    ],
+    "providers": [
+      "deepseek",
+      "jev"
+    ],
+    "baseline": "baseline/pre-jev-20260925",
+    "git_commit": "c317699ebbc440e06c90dbff6d3431be19a6a6ec",
+    "config": {
+      "mode": "auto",
+      "strategy": "hybrid",
+      "router_provider": "deepseek",
+      "jev_min_confidence": 0.0,
+      "router_timeout_seconds": 8,
+      "max_iterations": 3,
+      "model": null,
+      "min_length": 50
+    },
+    "requested_models": {
+      "deepseek": "deepseek-flash",
+      "jev": "jev-latest"
+    },
+    "label_source": "synthetic assistant labels, not independently human-reviewed",
+    "max_calls_per_provider": 200,
+    "concurrency": 2
+  },
+  "metrics": {
+    "deepseek/dev/all": {
+      "n": 2,
+      "tp": 0,
+      "tn": 2,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": 1.0,
+      "wilson95_reference_only": [
+        0.34237,
+        1.0
+      ],
+      "review_recall": null,
+      "false_review_rate": 0.0,
+      "review_precision": null,
+      "api_calls": 2,
+      "api_valid_rate": 1.0,
+      "fallbacks": 0,
+      "p50_call_ms": 981.75,
+      "p95_call_ms": 1015.58,
+      "usage_reported": {
+        "input_tokens": 1117,
+        "output_tokens": 133,
+        "total_tokens": 1250
+      },
+      "errors": {}
+    },
+    "deepseek/dev/ambiguous": {
+      "n": 2,
+      "tp": 0,
+      "tn": 2,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": 1.0,
+      "wilson95_reference_only": [
+        0.34237,
+        1.0
+      ],
+      "review_recall": null,
+      "false_review_rate": 0.0,
+      "review_precision": null,
+      "api_calls": 2,
+      "api_valid_rate": 1.0,
+      "fallbacks": 0,
+      "p50_call_ms": 981.75,
+      "p95_call_ms": 1015.58,
+      "usage_reported": {
+        "input_tokens": 1117,
+        "output_tokens": 133,
+        "total_tokens": 1250
+      },
+      "errors": {}
+    },
+    "deepseek/dev/rule": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "deepseek/test/all": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "deepseek/test/ambiguous": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "deepseek/test/rule": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "jev/dev/all": {
+      "n": 2,
+      "tp": 0,
+      "tn": 2,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": 1.0,
+      "wilson95_reference_only": [
+        0.34237,
+        1.0
+      ],
+      "review_recall": null,
+      "false_review_rate": 0.0,
+      "review_precision": null,
+      "api_calls": 2,
+      "api_valid_rate": 1.0,
+      "fallbacks": 0,
+      "p50_call_ms": 692.65,
+      "p95_call_ms": 744.79,
+      "usage_reported": {
+        "input_tokens": 2269,
+        "output_tokens": 346
+      },
+      "errors": {}
+    },
+    "jev/dev/ambiguous": {
+      "n": 2,
+      "tp": 0,
+      "tn": 2,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": 1.0,
+      "wilson95_reference_only": [
+        0.34237,
+        1.0
+      ],
+      "review_recall": null,
+      "false_review_rate": 0.0,
+      "review_precision": null,
+      "api_calls": 2,
+      "api_valid_rate": 1.0,
+      "fallbacks": 0,
+      "p50_call_ms": 692.65,
+      "p95_call_ms": 744.79,
+      "usage_reported": {
+        "input_tokens": 2269,
+        "output_tokens": 346
+      },
+      "errors": {}
+    },
+    "jev/dev/rule": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "jev/test/all": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "jev/test/ambiguous": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    },
+    "jev/test/rule": {
+      "n": 0,
+      "tp": 0,
+      "tn": 0,
+      "fp": 0,
+      "fn": 0,
+      "label_agreement": null,
+      "wilson95_reference_only": null,
+      "review_recall": null,
+      "false_review_rate": null,
+      "review_precision": null,
+      "api_calls": 0,
+      "api_valid_rate": null,
+      "fallbacks": 0,
+      "p50_call_ms": null,
+      "p95_call_ms": null,
+      "usage_reported": {},
+      "errors": {}
+    }
+  },
+  "paired_ambiguous": {
+    "dev": {
+      "status": "complete",
+      "n": 2,
+      "families": 1,
+      "agreement_delta": 0.0,
+      "cluster_bootstrap95": [
+        0.0,
+        0.0
+      ],
+      "note": "Synthetic assistant labels; family bootstrap, not online effect or independent human gold."
+    },
+    "test": {
+      "status": "incomplete"
+    }
+  }
+}

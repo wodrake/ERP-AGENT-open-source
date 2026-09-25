@@ -360,8 +360,8 @@ def create_main_agent(
     _harness_config = load_harness_config()
     _review_cfg = _harness_config.get("review", {}) if isinstance(_harness_config, dict) else {}
     _review_max_iterations = _review_cfg.get("max_iterations", 3)
-    router_llm = get_llm(thinking=False, timeout=_review_cfg.get("router_timeout_seconds", 8),
-                         max_retries=0, max_tokens=400)
+    from .jev_router import build_review_router
+    router_llm = build_review_router(_review_cfg)
 
     # 注意：create_deep_agent 内部已自动添加：
     # - SummarizationMiddleware（自动摘要 + compact_conversation 工具）

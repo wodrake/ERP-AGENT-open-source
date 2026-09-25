@@ -1,0 +1,30 @@
+{
+  "dataset_sha256": "efbac97f3d21d15764e7e88e6d7c5c54dcaf6c9c99bcad623586c0436ad8d5d8",
+  "sample_ids": [
+    "skip-thanks-3",
+    "skip-thanks-4"
+  ],
+  "providers": [
+    "deepseek",
+    "jev"
+  ],
+  "baseline": "baseline/pre-jev-20260925",
+  "git_commit": "c317699ebbc440e06c90dbff6d3431be19a6a6ec",
+  "config": {
+    "mode": "auto",
+    "strategy": "hybrid",
+    "router_provider": "deepseek",
+    "jev_min_confidence": 0.0,
+    "router_timeout_seconds": 8,
+    "max_iterations": 3,
+    "model": null,
+    "min_length": 50
+  },
+  "requested_models": {
+    "deepseek": "deepseek-flash",
+    "jev": "jev-latest"
+  },
+  "label_source": "synthetic assistant labels, not independently human-reviewed",
+  "max_calls_per_provider": 200,
+  "concurrency": 2
+}

@@ -24,7 +24,12 @@ def download_and_extract(url: str, target_dir: str) -> str:
         print(f"[2/4] 解压到: {target_dir}")
         os.makedirs(target_dir, exist_ok=True)
         with zipfile.ZipFile(tmp_path, "r") as zf:
-            zf.extractall(target_dir)
+            target = os.path.abspath(target_dir)
+            for member in zf.namelist():
+                member_path = os.path.abspath(os.path.join(target, member))
+                if os.path.commonpath([target, member_path]) != target:
+                    raise ValueError(f"Unsafe path in archive: {member}")
+                zf.extract(member, target_dir)
 
         # 查找 SKILL.md
         print("[3/4] 验证技能结构...")

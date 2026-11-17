@@ -18,25 +18,20 @@
 
 ---
 
-## 2026-11-18 更新：工程化基线（R4）与写操作安全闭环（R1）
+## 2026-11-18 更新：写操作安全闭环与工程化基线
 
-本次包含两项已完成的更新。R4 工程化基线已合并到 `main`（PR #5）；本分支（PR #6）在其上补齐写操作审批，并解决与 R4 的合并冲突。
+本次合并 PR #5（工程化基线）与 PR #6（写操作安全闭环）。任何会修改 ERP 的操作都必须先经人工审批、留下审批记录，且同一审批不会重复写入；同时提供 Docker Compose 一键启动、CI 与许可证。
 
-### R4 工程化基线（已合入 main）
+- **写操作全量审批**：`order_create`、`order_update`、`inventory_inbound` 等 8 个写工具集中声明在 `WRITE_TOOLS`，主 Agent 与全部子 Agent 的审批中断都由这一份清单生成。启动自检默认严格，名字像写操作却未进清单的 MCP 工具会拒绝启动。
+- **审批审计与幂等**：每次审批生成 `approval_id`，审批记录先写入 MongoDB，成功后才执行 ERP 写入；同一 `approval_id` 再次 resume 只返回首次结果，不会重复下单。MongoDB 不可用时直接拒绝写操作（fail-closed）。
+- **resume 与 MCP 双层校验**：`/resume` 必须携带当前中断的 `approval_id`，旧审批卡片批不了新审批；编辑时不能换工具或改白名单外字段，订单金额偏差需 ≤ 0.01、数量须为 ≥1 的整数。MCP 写工具调用 ERP 前再次检查已批准记录，否则返回 `written=false`。
+- **DeepSeek 审查兼容修复**：框架默认以 `json_schema` 请求 Grader，DeepSeek 返回 400 `This response_format type is unavailable now`，导致审查失败、对话提前结束、走不到写工具审批。现改用 `json_object` 并在本地解析（`src/agent/middlewares/json_grader.py`）；审查器出错时只记日志并跳过审查，不影响主流程与审批。
+- **一键启动与沙箱默认值**：`docker compose up` 拉起 MongoDB、模拟 ERP、MCP、后端与前端。默认 `SANDBOX_BACKEND=state`，不挂载 `docker.sock`，Docker 不可用时也不回退到宿主机执行；真 Docker 沙箱见 `docker-compose.docker-sandbox.yml`。新增后端与 MCP 的 `/health` 健康检查。
+- **稳定性**：沙箱 seccomp 对 `clone3` 返回 `ENOSYS`，让 glibc 回退到受过滤的 `clone`；GET 重试设总时长上限（默认 12 秒，原最坏约 90 秒），超时返回结构化错误。
+- **工程化**：新增 GitHub Actions CI（单测、前端类型检查/ESLint/构建、MCP 进程恢复与 R1 审批的 MongoDB 集成测试）、`requirements.lock`，以及 MIT 许可证。
+- **验证**：在 WSL + Docker 本地环境中，`docker compose` 全部服务健康，下单冒烟测试通过（拒绝不写单、批准后创建一笔订单）；接入模拟 ERP 实测审批流程：批准前停在审批且 ERP 无写入，批准后只写入一笔，拒绝不写入。合并前相关回归 50 项通过，CI 全绿。
 
-- 提供 `docker compose` 一键拉起 MongoDB、模拟 ERP、MCP、后端和前端；默认 `SANDBOX_BACKEND=state`，不挂载 `docker.sock`。真 Docker 沙箱见 `docker-compose.docker-sandbox.yml`。
-- 新增 GitHub Actions CI、前端 ESLint，以及 MIT 许可证。
-- 沙箱 seccomp 对 `clone3` 返回 `ENOSYS`，让 glibc 回退到受过滤的 `clone`；GET 请求重试加上总时长上限（默认 12 秒），超时返回结构化错误。
-
-### R1 写操作安全闭环
-
-- **写操作必须人工审批**：所有会修改 ERP 的工具（如 `order_create`）统一列入写工具清单，调用前一律触发人工审批中断；未经批准不会写入 ERP，拒绝则不写入。
-- **审批记录与幂等**：每次审批生成 `approval_id`，审批结果先写入 MongoDB，成功后才执行 ERP 写入；`approval_id` 建有唯一索引，同一审批不会重复下单。MongoDB 不可用时默认拒绝写入（fail-closed），恢复后再 resume 会先补记录再写。
-- **resume 校验**：`/resume` 必须携带当前这次中断的 `approval_id`，旧审批卡片无法批准同一会话里后来的新审批；编辑时不允许换工具或修改白名单以外的字段，修改后的订单仍需通过金额与数量（≥1 的整数）校验。
-- **MCP 层兜底**：MCP 写工具调用 ERP 前再次检查 `approval_id`，必须已有 approve 或 edit 记录，否则返回错误且 `written=false`。
-- **DeepSeek 审查兼容**：框架默认用 `response_format={"type": "json_schema"}` 请求 Grader 结构化结果，DeepSeek 返回 400 `This response_format type is unavailable now`，导致审查失败、对话提前结束、走不到写工具审批。现改为 `json_object` 请求并在本地解析为 `GraderResponse`（`src/agent/middlewares/json_grader.py`）；审查器出错时只记一条日志并跳过审查，不中断主流程与写工具审批。
-- **与 R4 的衔接**：沙箱选择复用 R4 的 `select_execution_backend`；MCP 同时保留 `/health` 与写工具启动自检；compose 中 MCP 服务接入 MongoDB；R1 审批测试并入 CI，不再单独使用 `r1-approval.yml`。
-- **验证**：在本地模拟 ERP（`ERP_BASE_URL=http://127.0.0.1:8081`）上实测：批准前停在审批且 ERP 无写入，`/resume` 批准后只创建一笔订单，拒绝时不写入；新增审查兼容测试，混合审查测试 21 项通过。
+以上为模拟 ERP 与本地环境结果，未覆盖真实 Java ERP 全链路。请求人与审批人目前取请求中的 `user_id`，尚未认证，多用户上线前需完成身份认证（R2）。
 
 ## 2026-10-23 更新：Langfuse 可观测性与真实模型验收
 

@@ -38,6 +38,16 @@ def pseudonym(value):
     return hmac.new(os.environ['ERP_TRACE_HASH_KEY'].encode(), str(value).encode(), hashlib.sha256).hexdigest()[:32]
 
 
+def _propagate_attributes(identity):
+    """langfuse 未安装时不中断追踪逻辑；调用方仍然可以挂假客户端做测试。"""
+    try:
+        from langfuse import propagate_attributes
+    except Exception:
+        from contextlib import nullcontext
+        return nullcontext()
+    return propagate_attributes(**identity)
+
+
 class Trace:
     def __init__(self, user, thread, resume=False):
         self.client = client()
@@ -46,9 +56,8 @@ class Trace:
         self.first_token = False
         if self.client:
             try:
-                from langfuse import propagate_attributes
                 identity={'user_id':pseudonym(user),'session_id':pseudonym(thread)}
-                with propagate_attributes(**identity):
+                with _propagate_attributes(identity):
                     self.root = self.client.start_observation(name='erp.request', as_type='span')
                 self.root.update(metadata={**identity,'resume': bool(resume), 'content_policy': 'metadata_only'})
             except Exception: self.root = None

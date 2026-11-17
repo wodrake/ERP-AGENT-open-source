@@ -1,0 +1,127 @@
+# 一键拉起 mongo、mock-erp、mcp-server、backend、frontend。
+# 沙箱默认 SANDBOX_BACKEND=state，且本文件不挂载 docker.sock。
+# 真 Docker 沙箱见 docker-compose.docker-sandbox.yml，不要把 sock 加进这个默认文件。
+# 密钥只从运行环境或本地未提交的 .env 读取，这里的默认值都是占位符。
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  mock-erp:
+    build: .
+    restart: unless-stopped
+    environment:
+      MOCK_ERP_HOST: 0.0.0.0
+      MOCK_ERP_PORT: "8081"
+    command: ["python", "-m", "deploy.mock_erp"]
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  mcp-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      ERP_BASE_URL: http://mock-erp:8081
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "9000"
+      HTTP_TIMEOUT: "30"
+      HTTP_GET_ATTEMPT_TIMEOUT: "5"
+      HTTP_GET_DEADLINE_SECONDS: "12"
+    command: ["python", "-m", "src.mcp_server.server_main"]
+    ports:
+      - "9000:9000"
+    depends_on:
+      mock-erp:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  backend:
+    build: .
+    restart: unless-stopped
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-sk-example-replace-me}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-erp_agent}
+      ERP_BASE_URL: http://mock-erp:8081
+      MCP_SERVER_URL: http://mcp-server:9000
+      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-state}
+      SANDBOX_ALLOW_LOCAL_FALLBACK: ${SANDBOX_ALLOW_LOCAL_FALLBACK:-false}
+      MCP_DEGRADED_SESSION_TTL_SECONDS: ${MCP_DEGRADED_SESSION_TTL_SECONDS:-60}
+      ERP_LANGFUSE_ENABLED: ${ERP_LANGFUSE_ENABLED:-false}
+    command: ["python", "-m", "src.api_view.web_main"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; body=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)); assert body['status']=='ok', body; comps=body['components']; assert all(comps[name]['status']=='ok' for name in ('mcp','mongo','sandbox')), body",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 16
+      start_period: 40s
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      INTERNAL_API_ORIGIN: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 12
+      start_period: 40s

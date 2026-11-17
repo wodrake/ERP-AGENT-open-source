@@ -1,0 +1,14 @@
+# 可选覆盖：启用真 Docker 沙箱。不要单独使用，要和默认 compose 一起加载：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.docker-sandbox.yml up -d --build
+#
+# 这会把宿主机的 /var/run/docker.sock 挂进 backend 容器。拥有该套接字的进程
+# 可以操作宿主机上的 Docker，效果接近宿主机 root。只在受信任的开发机上打开。
+
+services:
+  backend:
+    environment:
+      SANDBOX_BACKEND: docker
+      SANDBOX_ALLOW_LOCAL_FALLBACK: "false"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

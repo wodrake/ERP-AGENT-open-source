@@ -29,6 +29,7 @@ export function useChat() {
   const toolCallsRef = useRef<ToolCallInfo[]>([]);
   const currentToolIdRef = useRef<string>("");
   const pendingQueueRef = useRef<string[]>([]);
+  const doSendRef = useRef<(content: string) => void>(() => {});
 
   const resetAssistantState = useCallback(() => {
     assistantMsgRef.current = "";
@@ -160,7 +161,7 @@ export function useChat() {
           break;
         }
 
-        case "done":
+        case "done": {
           setStreaming(false);
           setPhase("done");
           setPhaseLabel("✅ 完成");
@@ -178,9 +179,10 @@ export function useChat() {
             const next = q.shift()!;
             setPendingQueue([...q]);
             // 延迟一帧发送，确保 streaming 状态已更新
-            setTimeout(() => doSend(next), 50);
+            setTimeout(() => doSendRef.current(next), 50);
           }
           break;
+        }
       }
     },
     [updateAssistantMessage]
@@ -234,6 +236,7 @@ export function useChat() {
     },
     [threadId, start, resetAssistantState]
   );
+  doSendRef.current = doSend;
 
   const sendMessage = useCallback(
     (content: string) => {

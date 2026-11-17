@@ -2,6 +2,9 @@
 import json
 from deepagents import RubricMiddleware
 from langchain.agents.middleware import AgentMiddleware, hook_config
+from langgraph.errors import GraphBubbleUp
+
+from .json_grader import JsonModeRubricMiddleware, log_grader_skip
 from ..harness import HarnessPhaseState
 from ..review_policy import ReviewRoute, compose_rubric, reset_grading
 
@@ -62,20 +65,61 @@ class ReviewExecutionGate(AgentMiddleware):
         return updates
 
 
-class SafeRubricMiddleware(RubricMiddleware):
-    """A separate single-pass reviewer prevents write retries without shared mutation."""
+class SafeRubricMiddleware(JsonModeRubricMiddleware):
+    """A separate single-pass reviewer prevents write retries without shared mutation.
+
+    两级保险，避免审查把主流程带走：
+    1. 用 DeepSeek 支持的 json_object 取结构化判定（json_schema 会被接口 400 拒绝）；
+    2. 评分器仍不可用时（接口报错、输出无法解析）只记一条日志并跳过本轮审查，
+       会话继续走完，写工具的人工审批中断不受影响。
+    """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._write_reviewer = RubricMiddleware(**{**kwargs, "max_iterations": 1})
+        self._write_reviewer = JsonModeRubricMiddleware(**{**kwargs, "max_iterations": 1})
+
+    def _reviewer_for(self, state):
+        return self._write_reviewer if state.get("_review_write_attempted") else self
+
+    def _run_sync_review(self, state, runtime):
+        reviewer = self._reviewer_for(state)
+        if reviewer is self:
+            # 直接调用框架实现，绕开本类的降级包装，避免递归。
+            return RubricMiddleware.after_agent(self, state, runtime)
+        return reviewer.after_agent(state, runtime)
+
+    async def _run_async_review(self, state, runtime):
+        reviewer = self._reviewer_for(state)
+        if reviewer is self:
+            return await RubricMiddleware.aafter_agent(self, state, runtime)
+        return await reviewer.aafter_agent(state, runtime)
+
+    @staticmethod
+    def _degrade(update):
+        """框架把评分异常记成 grader_error：这里降级为“跳过审查”。"""
+        if isinstance(update, dict) and update.get("_rubric_status") == "grader_error":
+            evaluations = update.get("_rubric_evaluations") or []
+            detail = evaluations[-1].get("explanation", "") if evaluations else ""
+            log_grader_skip(detail or "grader_error")
+            return None
+        return update
 
     @hook_config(can_jump_to=["model"])
     def after_agent(self, state, runtime):
-        if state.get("_review_write_attempted"):
-            return self._write_reviewer.after_agent(state, runtime)
-        return super().after_agent(state, runtime)
+        try:
+            return self._degrade(self._run_sync_review(state, runtime))
+        except GraphBubbleUp:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- 审查失败不得中断主流程
+            log_grader_skip(exc)
+            return None
 
     @hook_config(can_jump_to=["model"])
     async def aafter_agent(self, state, runtime):
-        if state.get("_review_write_attempted"):
-            return await self._write_reviewer.aafter_agent(state, runtime)
-        return await super().aafter_agent(state, runtime)
+        try:
+            return self._degrade(await self._run_async_review(state, runtime))
+        except GraphBubbleUp:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- 审查失败不得中断主流程
+            log_grader_skip(exc)
+            return None

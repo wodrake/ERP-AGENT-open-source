@@ -18,6 +18,15 @@
 
 ---
 
+## 2026-11-18 更新：写操作安全闭环（R1）与 DeepSeek 审查兼容修复
+
+- **写操作必须人工审批**：所有会修改 ERP 的工具（如 `order_create`）统一列入写工具清单，调用前一律触发人工审批中断；未经批准不会写入 ERP，拒绝则不写入。
+- **审批记录与幂等**：每次审批生成 `approval_id`，审批结果先写入 MongoDB，成功后才执行 ERP 写入；`approval_id` 建有唯一索引，同一审批不会重复下单。MongoDB 不可用时默认拒绝写入（fail-closed），恢复后再 resume 会先补记录再写。
+- **resume 校验**：`/resume` 必须携带当前这次中断的 `approval_id`，旧审批卡片无法批准同一会话里后来的新审批；编辑时不允许换工具或修改白名单以外的字段，修改后的订单仍需通过金额与数量（≥1 的整数）校验。
+- **MCP 层兜底**：MCP 写工具调用 ERP 前再次检查 `approval_id`，必须已有 approve 或 edit 记录，否则返回错误且 `written=false`。
+- **DeepSeek 审查兼容**：框架默认用 `response_format={"type": "json_schema"}` 请求 Grader 结构化结果，DeepSeek 返回 400 `This response_format type is unavailable now`，导致审查失败、对话提前结束、走不到写工具审批。现改为 `json_object` 请求并在本地解析为 `GraderResponse`（`src/agent/middlewares/json_grader.py`）；审查器出错时只记一条日志并跳过审查，不中断主流程与写工具审批。
+- **验证**：在本地模拟 ERP（`ERP_BASE_URL=http://127.0.0.1:8081`）上实测：批准前停在审批且 ERP 无写入，`/resume` 批准后只创建一笔订单，拒绝时不写入；新增审查兼容测试，混合审查测试 21 项通过。
+
 ## 2026-10-23 更新：Langfuse 可观测性与真实模型验收
 
 - **可选元数据追踪**：新增 Langfuse 接入，默认关闭；缺少配置或依赖时业务照常执行。网页每次 stream/resume 生成独立 Trace，同一会话通过 HMAC 假名化的 session_id 关联，模型、工具与子链路按回调 run_id 建立父子关系。

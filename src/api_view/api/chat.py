@@ -40,7 +40,7 @@ PHASE_LABELS = {
 
 
 from ...agent.observability import traced_stream, traced_config, event
-from ...agent.approval_flow import maybe_replay
+from ...agent.approval_flow import prepare_resume
 from ...agent.approval_view import build_sse_interrupt
 
 
@@ -113,18 +113,24 @@ async def stream_chat_response(
         # 发射“深度思考”事件（前端展示思考动画）
         yield sse_event("thinking", {"status": "start"})
 
-        # 同一个审批已经执行过时，再次 resume 直接交回首次结果，不再跑图、不再写 ERP。
+        # 写审批必须对上当前中断的 approval_id。已执行过的审批直接回放，不再写 ERP。
         if resume_data is not None:
-            replay = await maybe_replay(session.agent, config, thread_id)
-            if replay is not None:
+            prepared = await prepare_resume(session.agent, config, resume_data, thread_id)
+            if prepared["kind"] == "error":
                 yield sse_event("thinking", {"status": "end"})
-                yield sse_event("token", {"content": replay["message"], "source": "main"})
+                yield sse_event("error", {"message": prepared["message"]})
+                yield sse_event("done", {"thread_id": thread_id, "interrupted": True})
+                return
+            if prepared["kind"] == "replay":
+                yield sse_event("thinking", {"status": "end"})
+                yield sse_event("token", {"content": prepared["message"], "source": "main"})
                 yield sse_event("done", {
                     "thread_id": thread_id,
                     "interrupted": False,
                     "idempotent_replay": True,
                 })
                 return
+            current_input = prepared["input"]
 
         async for namespace, chunk_type, chunk in session.agent.astream(
             input=current_input,

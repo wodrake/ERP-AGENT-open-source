@@ -1,7 +1,6 @@
 # 一键拉起 mongo、mock-erp、mcp-server、backend、frontend。
-# 沙箱默认 SANDBOX_BACKEND=state：不挂载 docker.sock，代码不会在宿主机执行。
-# 要启用 Docker 沙箱时，把 backend 的 SANDBOX_BACKEND 改成 docker，并挂载宿主机
-# docker.sock；seccomp 失败时 /health 的 sandbox.seccomp 会是 degraded。
+# 沙箱默认 SANDBOX_BACKEND=state，且本文件不挂载 docker.sock。
+# 真 Docker 沙箱见 docker-compose.docker-sandbox.yml，不要把 sock 加进这个默认文件。
 # 密钥只从运行环境或本地未提交的 .env 读取，这里的默认值都是占位符。
 
 services:

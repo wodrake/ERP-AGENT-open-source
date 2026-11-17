@@ -5,6 +5,7 @@
 - src/test/test_memory_layer.py 的 34 项记忆测试
 
 tests/live 下的脚本需要真实服务，默认不执行。设置 RUN_LIVE_TESTS=1 后再单独运行。
+MCP 进程启停恢复在 tests/integration/test_mcp_process_recovery.py，由 CI 的 integration job 执行。
 """
 from __future__ import annotations
 

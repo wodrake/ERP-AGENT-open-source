@@ -128,6 +128,31 @@ async def health():
     return await collect_health()
 
 
+def _session_probe_enabled() -> bool:
+    return os.getenv("ERP_SESSION_PROBE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.get("/health/session")
+async def session_probe(user_id: str = "mcp-recovery"):
+    """测试探针：构建或复用用户会话并返回 MCP 工具数。
+
+    默认关闭。集成测试设置 ERP_SESSION_PROBE=1 后，用它观察降级会话是否在
+    TTL 后重建，而不调用大模型。
+    """
+    if not _session_probe_enabled():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="session probe disabled")
+    from .agent_loader import agent_loader
+
+    session = await agent_loader.get_session(user_id, "probe")
+    return {
+        "user_id": session.user_id,
+        "mcp_tool_count": session.mcp_tool_count,
+        "degraded": session.degraded,
+        "pid": os.getpid(),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

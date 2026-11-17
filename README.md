@@ -389,7 +389,25 @@ docker compose up -d --build
 python scripts/smoke_procurement.py
 ```
 
-compose 会拉起 MongoDB、复用 `evals/business/fixture.py` 数据的 mock-erp、MCP Server、后端和前端。浏览器打开 http://localhost:3000 ，后端健康检查是 http://localhost:8000/health ，其中 `components.mcp`、`components.mongo`、`components.sandbox` 各自有状态。默认 `SANDBOX_BACKEND=state`，不挂载 `docker.sock`，代码执行不会落到宿主机。Docker 沙箱和 seccomp 需要显式改成 `SANDBOX_BACKEND=docker`；若 seccomp 仍失败，健康检查会把沙箱标成 `degraded`，而不是假装隔离生效。
+compose 会拉起 MongoDB、复用 `evals/business/fixture.py` 数据的 mock-erp、MCP Server、后端和前端。浏览器打开 http://localhost:3000 ，后端健康检查是 http://localhost:8000/health ，其中 `components.mcp`、`components.mongo`、`components.sandbox` 各自有状态。默认 `SANDBOX_BACKEND=state`，`docker-compose.yml` 不挂载 `docker.sock`，代码执行不会落到宿主机。MCP 恢复进程测试不在默认单测里。CI 的 `integration` job 会在后端保持运行时停掉再拉起 MCP，并确认 90 秒内新请求接回 23 个工具。本地需要已启动的 MongoDB：
+
+```bash
+python tests/integration/test_mcp_process_recovery.py
+```
+
+`GET /health/session` 默认关闭。只有设置 `ERP_SESSION_PROBE=1` 时才会构建会话并返回工具数，这个探针不调用模型。
+
+### 可选：真 Docker 沙箱
+
+默认编排不把 Docker 套接字给后端。只有在受信任的开发机上，才叠加这个覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.docker-sandbox.yml up -d --build
+```
+
+覆盖文件把宿主机的 `/var/run/docker.sock` 挂进 backend，并设置 `SANDBOX_BACKEND=docker`。`SANDBOX_ALLOW_LOCAL_FALLBACK` 仍是 false。seccomp 若仍失败，`/health` 的 `sandbox.seccomp` 会是 `degraded`。
+
+挂载 `docker.sock` 的风险：容器里的后端进程可以操作宿主机 Docker，包括创建特权容器、挂载宿主机目录和停止其他容器，效果接近宿主机 root。模型被诱导或后端被攻破时，沙箱边界不再成立。不要在共享机器、CI 或生产环境打开这个覆盖文件。
 
 MCP 暂时不可用时，会话会以 0 个 ERP 工具降级，并在 `MCP_DEGRADED_SESSION_TTL_SECONDS`（默认 60 秒）后自动重建。MCP 恢复后，新请求会重新加载工具，不必重启后端。
 

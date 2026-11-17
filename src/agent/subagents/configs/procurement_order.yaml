@@ -50,7 +50,8 @@ context_protocol:
     format: markdown
 
 # ===== 人工介入配置 =====
-# 订单创建和修改操作必须经过人工审批
+# 工具集合以 WRITE_TOOLS 为准，加载器会给本子 Agent 持有的每个写工具生成 interrupt_on。
+# 下面的描述只覆盖默认文案；漏写 inventory/supplier/part 等写工具不会把它们排除出审批。
 interrupt_on:
   order_create:
     allowed_decisions:
@@ -112,8 +113,10 @@ system_prompt: |
   ## 数据校验规则
   - quantity 必须 >= 1
   - unitPrice 必须 > 0
+  - totalAmount 与明细数量乘单价的合计偏差不能超过 0.01 元
   - partId 必须是有效的零部件ID（可用 part_query 验证）
   - orderNumber 不能重复
+  - 如果工具返回 validation_error，不要再次提交审批；先按错误修正数量、单价或合计。
 
   ## 输出规范
   - 创建前展示完整订单摘要

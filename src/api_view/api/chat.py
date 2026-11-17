@@ -40,6 +40,8 @@ PHASE_LABELS = {
 
 
 from ...agent.observability import traced_stream, traced_config, event
+from ...agent.approval_flow import maybe_replay
+from ...agent.approval_view import build_sse_interrupt
 
 
 @traced_stream
@@ -110,6 +112,19 @@ async def stream_chat_response(
     try:
         # 发射“深度思考”事件（前端展示思考动画）
         yield sse_event("thinking", {"status": "start"})
+
+        # 同一个审批已经执行过时，再次 resume 直接交回首次结果，不再跑图、不再写 ERP。
+        if resume_data is not None:
+            replay = await maybe_replay(session.agent, config, thread_id)
+            if replay is not None:
+                yield sse_event("thinking", {"status": "end"})
+                yield sse_event("token", {"content": replay["message"], "source": "main"})
+                yield sse_event("done", {
+                    "thread_id": thread_id,
+                    "interrupted": False,
+                    "idempotent_replay": True,
+                })
+                return
 
         async for namespace, chunk_type, chunk in session.agent.astream(
             input=current_input,
@@ -184,21 +199,8 @@ async def stream_chat_response(
                                         "message": interrupt_value.get("message", ""),
                                         "extracted_data": interrupt_value.get("current_data", {}),
                                     })
-                                elif "action_requests" in interrupt_value:
-                                    yield sse_event("interrupt", {
-                                        "interrupt_type": "hitl_approval",
-                                        "tool_name": interrupt_value.get("tool_name", ""),
-                                        "tool_args": interrupt_value.get("action_requests", {}),
-                                        "order_data": interrupt_value.get("action_requests", {}),
-                                    })
                                 else:
-                                    # 通用中断（interrupt_on 触发的审批）
-                                    yield sse_event("interrupt", {
-                                        "interrupt_type": "hitl_approval",
-                                        "tool_name": interrupt_value.get("tool_name", ""),
-                                        "tool_args": interrupt_value.get("tool_args", interrupt_value),
-                                        "order_data": interrupt_value.get("tool_args", interrupt_value),
-                                    })
+                                    yield sse_event("interrupt", build_sse_interrupt(interrupt_value))
 
                         # 保存当前累积的消息
                         if assistant_content:
@@ -414,12 +416,17 @@ async def chat_resume(thread_id: str, request: ResumeRequest):
     await agent_loader.initialize()
     user_id = await agent_loader.get_conversation_user_id(thread_id) or "default_user"
 
+    try:
+        resume_payload = request.payload()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="缺少 resume")
+
     return StreamingResponse(
         stream_chat_response(
             message="",
             thread_id=thread_id,
             user_id=user_id,
-            resume_data=request.resume,
+            resume_data=resume_payload,
         ),
         media_type="text/event-stream",
         headers={

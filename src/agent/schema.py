@@ -39,7 +39,16 @@ class ChatRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     """中断恢复请求模型"""
-    resume: dict = Field(..., description="恢复数据，格式取决于中断类型")
+    resume: Optional[dict] = Field(default=None, description="恢复数据，格式取决于中断类型")
+    # 前端历史上使用 resume_data。两个字段都接受，避免审批卡提交被 422 丢掉。
+    resume_data: Optional[dict] = Field(default=None, description="与 resume 同义")
+
+    def payload(self) -> dict:
+        if self.resume is not None:
+            return self.resume
+        if self.resume_data is not None:
+            return self.resume_data
+        raise ValueError("缺少 resume")
 
 
 class SSEEvent(BaseModel):

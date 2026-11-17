@@ -5,6 +5,7 @@ supplier_query / supplier_page / supplier_get
 import json
 from fastmcp import FastMCP
 from ..http_base import erp_client
+from ..idempotency import run_idempotent
 
 
 def register_supplier_tools(mcp: FastMCP):
@@ -66,59 +67,72 @@ def register_supplier_tools(mcp: FastMCP):
         result = await erp_client.get(f"/api/suppliers/get/{id}")
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    @mcp.tool()
-    async def supplier_create(
-        supplier_code: str,
-        name: str,
-        contact_person: str = None,
-        phone: str = None,
-        email: str = None,
-        address: str = None,
-        credit_rating: str = None,
-        status: int = 1,
-    ) -> str:
-        """创建新供应商。
+    mcp.tool()(supplier_create)
+    mcp.tool()(supplier_update_status)
 
-        Args:
-            supplier_code: 供应商编码（必填）
-            name: 供应商名称（必填）
-            contact_person: 联系人
-            phone: 联系电话
-            email: 邮箱
-            address: 地址
-            credit_rating: 信用评级 A/B/C/D
-            status: 合作状态 1=合作中 0=停止
 
-        Returns:
-            创建结果JSON
-        """
-        data = {
-            "supplierCode": supplier_code,
-            "name": name,
-            "contactPerson": contact_person,
-            "phone": phone,
-            "email": email,
-            "address": address,
-            "creditRating": credit_rating,
-            "status": status,
-        }
-        # 移除 None 值
-        data = {k: v for k, v in data.items() if v is not None}
+async def supplier_create(
+    supplier_code: str,
+    name: str,
+    contact_person: str = None,
+    phone: str = None,
+    email: str = None,
+    address: str = None,
+    credit_rating: str = None,
+    status: int = 1,
+    approval_id: str = "",
+) -> str:
+    """创建新供应商。
+
+    Args:
+        supplier_code: 供应商编码（必填）
+        name: 供应商名称（必填）
+        contact_person: 联系人
+        phone: 联系电话
+        email: 邮箱
+        address: 地址
+        credit_rating: 信用评级 A/B/C/D
+        status: 合作状态 1=合作中 0=停止
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        创建结果JSON
+    """
+    data = {
+        "supplierCode": supplier_code,
+        "name": name,
+        "contactPerson": contact_person,
+        "phone": phone,
+        "email": email,
+        "address": address,
+        "creditRating": credit_rating,
+        "status": status,
+    }
+    data = {k: v for k, v in data.items() if v is not None}
+
+    async def operation() -> str:
         result = await erp_client.post("/api/suppliers/create", json_data=data)
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    @mcp.tool()
-    async def supplier_update_status(id: int, status: int) -> str:
-        """更新供应商合作状态。
+    return await run_idempotent(approval_id, "supplier_create", data, operation)
 
-        Args:
-            id: 供应商ID
-            status: 新状态 1=合作中 0=已停止
 
-        Returns:
-            操作结果JSON
-        """
+async def supplier_update_status(id: int, status: int, approval_id: str = "") -> str:
+    """更新供应商合作状态。
+
+    Args:
+        id: 供应商ID
+        status: 新状态 1=合作中 0=已停止
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        操作结果JSON
+    """
+
+    async def operation() -> str:
         result = await erp_client.patch(
             f"/api/suppliers/update-status/{id}", params={"status": status}
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "supplier_update_status", {"id": id, "status": status}, operation)

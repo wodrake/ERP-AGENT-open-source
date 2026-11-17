@@ -15,6 +15,8 @@
 - `part_page`: 分页查询零部件
 - `order_create`: 创建采购订单（需审批）
 - `order_update`: 更新订单（需审批）
+- `order_update_status`、`inventory_inbound`、`inventory_outbound`、`supplier_create`、`supplier_update_status`、`part_create`: 写入 ERP，执行前必须人工审批
+- 订单的 totalAmount 必须与明细数量乘单价一致（偏差不超过 0.01）；quantity >= 1，unitPrice > 0。校验失败不会进入审批
 - `order_page`: 分页查询订单
 - `order_get`: 获取订单详情
 - `order_search_details`: 搜索订单明细

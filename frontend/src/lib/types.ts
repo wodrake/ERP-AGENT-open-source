@@ -81,9 +81,37 @@ export interface InterruptData {
   missing_fields?: string[];
   message?: string;
   // hitl_approval
-  order_data?: Record<string, unknown>;
+  order_data?: Record<string, unknown> | unknown[];
   tool_name?: string;
-  tool_args?: Record<string, unknown>;
+  tool_args?: Record<string, unknown> | unknown[];
+  approval_id?: string;
+  risk_level?: string;
+  risk_label?: string;
+  allowed_decisions?: string[];
+  business_view?: {
+    writesErp?: boolean;
+    writes_erp?: boolean;
+    hint?: string;
+    actions: Array<{
+      toolName?: string;
+      tool_name?: string;
+      approvalId?: string;
+      approval_id?: string;
+      riskLevel?: string;
+      risk_level?: string;
+      riskLabel?: string;
+      risk_label?: string;
+      supplier?: string;
+      totalAmount?: number | null;
+      total_amount?: number | null;
+      lines?: Array<Record<string, unknown>>;
+      fields?: Array<{ label: string; value: string }>;
+      allowedDecisions?: string[];
+      allowed_decisions?: string[];
+      args?: Record<string, unknown>;
+    }>;
+  };
+  writes_erp?: boolean;
 }
 
 // ===== 消息类型 =====

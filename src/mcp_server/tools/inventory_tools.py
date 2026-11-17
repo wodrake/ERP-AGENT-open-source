@@ -5,6 +5,7 @@ inventory_warning / inventory_page / inventory_check / inventory_inbound / inven
 import json
 from fastmcp import FastMCP
 from ..http_base import erp_client
+from ..idempotency import run_idempotent
 
 
 def register_inventory_tools(mcp: FastMCP):
@@ -57,47 +58,8 @@ def register_inventory_tools(mcp: FastMCP):
         result = await erp_client.get("/api/inventory/check")
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    @mcp.tool()
-    async def inventory_inbound(
-        part_id: int,
-        quantity: int,
-        warehouse_location: str = None,
-    ) -> str:
-        """执行入库操作。
-
-        Args:
-            part_id: 零件ID（必填）.
-            quantity: 入库数量（必填，>0）
-            warehouse_location: 仓库位置（可选）
-
-        Returns:
-            操作结果JSON
-        """
-        params = {
-            "partId": part_id,
-            "quantity": quantity,
-            "warehouseLocation": warehouse_location,
-        }
-        result = await erp_client.post("/api/inventory/inbound", params=params)
-        return json.dumps(result, ensure_ascii=False, indent=2)
-
-    @mcp.tool()
-    async def inventory_outbound(part_id: int, quantity: int) -> str:
-        """执行出库操作。
-
-        Args:
-            part_id: 零件ID（必填）
-            quantity: 出库数量（必填，>0）
-
-        Returns:
-            操作结果JSON
-        """
-        params = {
-            "partId": part_id,
-            "quantity": quantity,
-        }
-        result = await erp_client.post("/api/inventory/outbound", params=params)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+    mcp.tool()(inventory_inbound)
+    mcp.tool()(inventory_outbound)
 
     @mcp.tool()
     async def inventory_get(id: int) -> str:
@@ -111,3 +73,53 @@ def register_inventory_tools(mcp: FastMCP):
         """
         result = await erp_client.get(f"/api/inventory/get/{id}")
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def inventory_inbound(
+    part_id: int,
+    quantity: int,
+    warehouse_location: str = None,
+    approval_id: str = "",
+) -> str:
+    """执行入库操作。
+
+    Args:
+        part_id: 零件ID（必填）.
+        quantity: 入库数量（必填，>0）
+        warehouse_location: 仓库位置（可选）
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        操作结果JSON
+    """
+    params = {
+        "partId": part_id,
+        "quantity": quantity,
+        "warehouseLocation": warehouse_location,
+    }
+
+    async def operation() -> str:
+        result = await erp_client.post("/api/inventory/inbound", params=params)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "inventory_inbound", params, operation)
+
+
+async def inventory_outbound(part_id: int, quantity: int, approval_id: str = "") -> str:
+    """执行出库操作。
+
+    Args:
+        part_id: 零件ID（必填）
+        quantity: 出库数量（必填，>0）
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        操作结果JSON
+    """
+    params = {"partId": part_id, "quantity": quantity}
+
+    async def operation() -> str:
+        result = await erp_client.post("/api/inventory/outbound", params=params)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "inventory_outbound", params, operation)

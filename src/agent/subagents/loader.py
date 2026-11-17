@@ -11,6 +11,8 @@ from pathlib import Path  # 导入路径库，用于处理文件路径
 from deepagents import SubAgent  # 导入子Agent类型（用于类型注解）
 from langchain_core.tools import BaseTool  # 导入工具基类，用于类型注解
 from ..log_utils import agent_logger  # 导入日志工具
+from ..mcp_tools_bean import build_interrupt_on
+from ..middlewares.write_approval import WriteApprovalMiddleware
 
 # 配置文件目录：当前文件所在目录下的 configs 文件夹
 CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -237,8 +239,14 @@ def resolve_subagent_tools(configs: list[dict], all_tools: list[BaseTool]) -> li
                 if tool not in matched_tools:
                     matched_tools.append(tool)
         
-        # 解析 interrupt_on 配置
-        interrupt_on = _parse_interrupt_on(config)
+        # interrupt_on 只从 WRITE_TOOLS 生成。YAML 里的同名描述可以覆盖文案，但不能少挂写工具。
+        tool_names = [getattr(tool, "name", "") for tool in matched_tools]
+        interrupt_on = build_interrupt_on(tool_names)
+        described = _parse_interrupt_on(config) or {}
+        for tool_name, tool_config in interrupt_on.items():
+            overlay = described.get(tool_name) or {}
+            if overlay.get("description"):
+                tool_config["description"] = overlay["description"]
 
         # 校验 output_format 契约结构（非法则记录错误，仍继续创建但契约不注入）
         output_contract = ""
@@ -253,7 +261,8 @@ def resolve_subagent_tools(configs: list[dict], all_tools: list[BaseTool]) -> li
             "tools": matched_tools,
         }
         
-        # 如果有 interrupt_on 配置，添加到规格中
+        # 写工具审批与订单校验。框架会在这份 middleware 之后再挂 HumanInTheLoop。
+        subagent_spec["middleware"] = [WriteApprovalMiddleware()]
         if interrupt_on:
             subagent_spec["interrupt_on"] = interrupt_on
         

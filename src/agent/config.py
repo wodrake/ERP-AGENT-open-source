@@ -66,6 +66,27 @@ SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS = get_env_int(
     "SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS", 30
 )
 
+
+def env_flag(key: str, default: bool = False) -> bool:
+    """读取布尔环境变量。未设置时使用 default，空字符串不当成 true。"""
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def sandbox_backend_mode() -> str:
+    """docker：尝试容器沙箱；state：只用内存 StateBackend（CI / 无 docker.sock）。"""
+    mode = (os.getenv("SANDBOX_BACKEND") or "docker").strip().lower()
+    if mode not in {"docker", "state"}:
+        return "docker"
+    return mode
+
+
+def sandbox_allow_local_fallback() -> bool:
+    """默认禁止在 Docker 不可用时退回宿主机 Shell。"""
+    return env_flag("SANDBOX_ALLOW_LOCAL_FALLBACK", False)
+
 # ============ Store 命名空间 ============
 SKILLS_STORE_NAMESPACE = ("persisted-skills",)
 PREFERENCES_STORE_NAMESPACE = ("user-preferences",)

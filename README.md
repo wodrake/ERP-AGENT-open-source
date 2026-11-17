@@ -380,6 +380,28 @@ ERP-AGENT/
 
 ## 快速启动
 
+### 一键部署
+
+```bash
+cp .env.example .env
+# 对话需要真实模型时，把 DEEPSEEK_API_KEY 换成自己的 Key；不要把真实 .env 提交到仓库
+docker compose up -d --build
+python scripts/smoke_procurement.py
+```
+
+compose 会拉起 MongoDB、复用 `evals/business/fixture.py` 数据的 mock-erp、MCP Server、后端和前端。浏览器打开 http://localhost:3000 ，后端健康检查是 http://localhost:8000/health ，其中 `components.mcp`、`components.mongo`、`components.sandbox` 各自有状态。默认 `SANDBOX_BACKEND=state`，不挂载 `docker.sock`，代码执行不会落到宿主机。Docker 沙箱和 seccomp 需要显式改成 `SANDBOX_BACKEND=docker`；若 seccomp 仍失败，健康检查会把沙箱标成 `degraded`，而不是假装隔离生效。
+
+MCP 暂时不可用时，会话会以 0 个 ERP 工具降级，并在 `MCP_DEGRADED_SESSION_TTL_SECONDS`（默认 60 秒）后自动重建。MCP 恢复后，新请求会重新加载工具，不必重启后端。
+
+依赖安装使用锁定文件，测试依赖里的 langfuse 已经包含在内：
+
+```bash
+pip install -r requirements.lock
+python scripts/run_tests.py
+```
+
+`tests/live/` 里的 `test_all_tools.py`、`agent_test.py`、`test_mcp.py` 需要真实服务，默认跳过。要跑它们时设置 `RUN_LIVE_TESTS=1`。
+
 ### 环境要求
 
 - Python 3.11+
@@ -395,8 +417,8 @@ ERP-AGENT/
 git clone <repo-url>
 cd ERP-AGENT
 
-# Python 依赖
-pip install -r requirements.txt
+# Python 依赖（锁定版本，含测试用的 langfuse）
+pip install -r requirements.lock
 
 # 前端依赖
 cd frontend
@@ -494,7 +516,7 @@ npm run dev
 MongoDB → Docker沙箱 → MCP Server(:9000) → Backend API(:8000) → Frontend(:3000)
 ```
 
-> 注意：MCP Server 必须在 Backend API 之前启动，因为 Agent 初始化时会连接 MCP Server 加载 23 个 ERP 工具。
+> 建议先启动 MCP Server，这样第一个会话就能加载 23 个 ERP 工具。如果后端更早启动，会话会降级并在默认 60 秒后自动重建，MCP 恢复后不需要重启后端。
 
 ---
 
@@ -551,10 +573,11 @@ WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务
 | POST | `/api/chat/{thread_id}/resume` | 中断恢复 |
 | GET | `/api/chat/{thread_id}/state` | 获取中断状态 |
 | GET | `/api/chat/{thread_id}/history` | 获取消息历史 |
-| GET | `/api/history/{user_id}` | 获取会话列表 |
+| GET | `/api/history?user_id=` | 获取会话列表（查询参数 `user_id`，默认 `default_user`） |
+| GET | `/api/history/{thread_id}/messages` | 获取指定会话的展示消息 |
 | DELETE | `/api/history/{thread_id}` | 删除会话 |
 | GET | `/api/download/{filename}` | 下载生成文件 |
-| GET | `/health` | 健康检查 |
+| GET | `/health` | 健康检查，返回 MCP、Mongo、沙箱各自状态 |
 
 ---
 

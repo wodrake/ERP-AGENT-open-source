@@ -9,6 +9,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from src.mcp_server.server_config import MCP_HOST, MCP_PORT
 from src.mcp_server.tools.suppliers_tools import register_supplier_tools
 from src.mcp_server.tools.parts_tools import register_parts_tools
@@ -26,6 +28,12 @@ register_supplier_tools(mcp)
 register_parts_tools(mcp)
 register_order_tools(mcp)
 register_inventory_tools(mcp)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def mcp_health(_request: Request) -> JSONResponse:
+    """供 compose 和后端 /health 探测，避免打到会挂起的 SSE。"""
+    return JSONResponse({"status": "ok", "service": "mcp"})
 
 
 if __name__ == "__main__":

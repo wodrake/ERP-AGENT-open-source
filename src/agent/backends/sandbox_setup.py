@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .custom_opensandbox import CustomOpenSandbox
+from .sandbox_status import note_basic_fallback, note_secure
 from ..log_utils import sandbox_logger
 from ..config import SANDBOX_WORK_DIR, SANDBOX_IMAGE
 
@@ -61,6 +62,12 @@ class SandboxConfig:
 # ============================================================
 
 _BUILTIN_SECCOMP = str(Path(__file__).parent / "seccomp.json")
+
+
+def seccomp_security_opt(profile_text: str) -> str:
+    """把 profile 压成单行 JSON。daemon 解析的是内容，不是文件路径。"""
+    compact = json.dumps(json.loads(profile_text), separators=(",", ":"))
+    return f"seccomp={compact}"
 
 
 # ============================================================
@@ -130,10 +137,11 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         # 仅添加运行必需的最小 Capability
         host_config_kwargs["cap_add"] = ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
 
-    # seccomp 安全策略
+    # Docker CLI 会先读 profile 再把 JSON 放进 SecurityOpt。
+    # 只传文件路径时，daemon 会把 "/path" 当 JSON 解析并拒绝启动，然后落到基础沙箱。
     security_opts = []
     if seccomp_profile:
-        security_opts.append(f"seccomp={seccomp_path}")
+        security_opts.append(seccomp_security_opt(seccomp_profile))
     security_opts.append("no-new-privileges:true")
     host_config_kwargs["security_opt"] = security_opts
 
@@ -167,12 +175,17 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         sandbox_logger.info(
             f"Secure sandbox created: {config.name} ({container.id[:12]})"
         )
+        if seccomp_profile:
+            note_secure(f"seccomp profile applied: {seccomp_path}")
+        else:
+            note_basic_fallback("seccomp profile missing; container started without it")
 
     except Exception as e:
-        # 安全创建失败时，回退到基础模式
+        # 安全创建失败时，回退到基础模式，并让 /health 显式标成已降级。
         sandbox_logger.warning(
             f"Secure sandbox creation failed ({e}), falling back to basic mode"
         )
+        note_basic_fallback(f"seccomp sandbox failed, using basic container: {e}")
         try:
             existing = client.containers.get(config.name)
             existing.stop(timeout=3)

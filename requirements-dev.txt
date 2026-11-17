@@ -1,0 +1,4 @@
+# 开发与测试依赖。CI 和本地回归安装 requirements.lock（由本文件锁定），
+# 不要只装 requirements.txt：可观测性测试需要 langfuse。
+-r requirements.txt
+-r requirements-observability.txt

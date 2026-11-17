@@ -20,7 +20,7 @@ from .api.history import router as history_router
 from .web_config import close_mongo_client
 from ..agent.log_utils import web_logger
 from ..agent.backends.sandbox_manager import sandbox_manager
-from ..agent.config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS
+from ..agent.config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS, sandbox_backend_mode
 
 
 async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
@@ -51,11 +51,18 @@ async def lifespan(app: FastAPI):
     stop_event = asyncio.Event()
     maintenance_task = None
     try:
-        # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建并回退到 LocalShell。
-        await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
-        maintenance_task = asyncio.create_task(
-            _sandbox_maintenance(stop_event), name="sandbox-maintenance"
-        )
+        # state 模式不接触 Docker，CI 和 compose 默认走这条路径，不挂 docker.sock。
+        if sandbox_backend_mode() == "docker":
+            # 预热失败不阻止 Web 服务启动；是否回退宿主机由 SANDBOX_ALLOW_LOCAL_FALLBACK 决定。
+            try:
+                await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
+            except Exception as exc:
+                web_logger.warning(f"Sandbox warm pool skipped: {exc}")
+            maintenance_task = asyncio.create_task(
+                _sandbox_maintenance(stop_event), name="sandbox-maintenance"
+            )
+        else:
+            web_logger.info("SANDBOX_BACKEND=state; Docker warm pool is not started")
         yield
     finally:
         web_logger.info("Shutting down ERP Agent Web Server...")
@@ -116,7 +123,9 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from .health import collect_health
+
+    return await collect_health()
 
 
 if __name__ == "__main__":

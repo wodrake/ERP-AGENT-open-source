@@ -3,6 +3,8 @@ AgentLoader 单例
 持有 agent 实例、MongoDB 连接、create_config、save/get_display_messages
 """
 import asyncio
+import os
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -21,6 +23,9 @@ class AgentSession:
     username: str
     agent: Any
     run_lock: asyncio.Lock
+    mcp_tool_count: int = 0
+    degraded: bool = False
+    expires_at: float | None = None
 
 
 class AgentLoader:
@@ -91,6 +96,23 @@ class AgentLoader:
         if user_id is not None:
             await self.get_session(user_id, username)
 
+    def _now(self) -> float:
+        """单独包一层，测试可以替换时钟而不影响 asyncio。"""
+        return time.monotonic()
+
+    def _degraded_ttl_seconds(self) -> float:
+        raw = os.getenv("MCP_DEGRADED_SESSION_TTL_SECONDS", "60")
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 60.0
+
+    def _session_reusable(self, session: AgentSession) -> bool:
+        """MCP 工具数为 0 的会话只在 TTL 内复用，到期后下一次请求重建。"""
+        if not session.degraded or session.expires_at is None:
+            return True
+        return self._now() < session.expires_at
+
     async def get_session(self, user_id: str, username: str = "用户") -> AgentSession:
         """获取用户独享的 Agent 会话，避免不同用户共享 Sandbox/中间件状态。"""
         await self._ensure_resources()
@@ -99,24 +121,31 @@ class AgentLoader:
             self._sessions_lock = asyncio.Lock()
         async with self._sessions_lock:
             existing = self._sessions.get(user_id)
-            if existing is not None:
+            if existing is not None and self._session_reusable(existing):
                 return existing
             build_lock = self._session_build_locks.setdefault(user_id, asyncio.Lock())
 
         async with build_lock:
+            refresh_mcp = False
             async with self._sessions_lock:
                 existing = self._sessions.get(user_id)
-                if existing is not None:
+                if existing is not None and self._session_reusable(existing):
                     return existing
+                refresh_mcp = existing is not None and existing.degraded
 
-            agent = await asyncio.to_thread(
-                self._build_agent_for_user, user_id, username
+            agent, mcp_count = await asyncio.to_thread(
+                self._build_agent_for_user, user_id, username, refresh_mcp
             )
+            degraded = mcp_count <= 0
+            ttl = self._degraded_ttl_seconds()
             session = AgentSession(
                 user_id=user_id,
                 username=username,
                 agent=agent,
                 run_lock=asyncio.Lock(),
+                mcp_tool_count=mcp_count,
+                degraded=degraded,
+                expires_at=(self._now() + ttl) if degraded else None,
             )
             async with self._sessions_lock:
                 self._sessions[user_id] = session
@@ -124,19 +153,35 @@ class AgentLoader:
                 # 兼容仍读取该字段的调试脚本。
                 if user_id == "default_user":
                     self.agent = agent
-            web_logger.info(f"Agent session ready for user: {user_id}")
+            if degraded:
+                web_logger.warning(
+                    "Agent session for %s is degraded (MCP tools=0); "
+                    "it will be rebuilt after %.0fs without restarting the backend",
+                    user_id,
+                    ttl,
+                )
+            else:
+                web_logger.info(
+                    "Agent session ready for user: %s (%s MCP tools)",
+                    user_id,
+                    mcp_count,
+                )
             return session
 
-    def _build_agent_for_user(self, user_id: str, username: str):
+    def _build_agent_for_user(self, user_id: str, username: str, refresh_mcp: bool = False):
         """在线程池中构建 Agent；其中包含 Docker/Mongo 同步 I/O。"""
         from ..agent.main_agent import create_main_agent
+        from ..agent.tools.mcp_client import invalidate_cache, last_load_info
 
+        if refresh_mcp:
+            invalidate_cache()
         context = ProcurementContext(user_id=user_id, username=username)
-        return create_main_agent(
+        agent = create_main_agent(
             user_context=context,
             checkpointer=self._checkpointer,
             store=self._store,
         )
+        return agent, int(last_load_info().get("count", 0))
 
     @property
     def store(self):

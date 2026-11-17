@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 沙箱固定为 StateBackend，不挂载 docker.sock，也不在宿主机执行命令。
+env:
+  SANDBOX_BACKEND: state
+  SANDBOX_ALLOW_LOCAL_FALLBACK: "false"
+  ERP_LANGFUSE_ENABLED: "false"
+  DEEPSEEK_API_KEY: ""
+  MONGODB_URI: mongodb://127.0.0.1:27017
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install locked dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.lock
+
+      - name: Unit tests and memory tests
+        run: python scripts/run_tests.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend lint and build
+        working-directory: frontend
+        run: npm ci && npm run build && npm run lint

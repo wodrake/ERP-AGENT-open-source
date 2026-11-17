@@ -1,5 +1,6 @@
 {
   "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
   "architectures": [
     "SCMP_ARCH_X86_64",
     "SCMP_ARCH_X86",
@@ -11,16 +12,17 @@
         "accept", "accept4", "access", "adjtimex", "alarm",
         "bind", "brk",
         "capget", "capset", "chdir", "chmod", "chown", "chown32",
-        "clock_getres", "clock_gettime", "clock_nanosleep", "clone",
-        "clone3", "close", "close_range", "connect", "copy_file_range",
+        "arch_prctl",
+        "clock_getres", "clock_gettime", "clock_nanosleep",
+        "close", "close_range", "connect", "copy_file_range",
         "creat",
         "dup", "dup2", "dup3",
         "epoll_create", "epoll_create1", "epoll_ctl", "epoll_ctl_old",
-        "epoll_pwait", "epoll_pwait2", "epoll_wait", "epoll_wait_old",
+        "epoll_pwait", "epoll_wait", "epoll_wait_old",
         "eventfd", "eventfd2", "execve", "execveat", "exit", "exit_group",
-        "faccessat", "faccessat2", "fadvise64", "fadvise64_64",
+        "faccessat", "fadvise64", "fadvise64_64",
         "fallocate", "fanotify_mark",
-        "fchdir", "fchmod", "fchmodat", "fchmodat2",
+        "fchdir", "fchmod", "fchmodat",
         "fchown", "fchown32", "fchownat",
         "fcntl", "fcntl64",
         "fdatasync",
@@ -30,7 +32,8 @@
         "fremovexattr", "fsetxattr",
         "fstat", "fstat64", "fstatat64", "fstatfs", "fstatfs64",
         "fsync", "ftruncate", "ftruncate64",
-        "futex", "futex_time64", "futex_waitv",
+        "futex", "futex_time64",
+        "getcpu",
         "getcwd",
         "getdents", "getdents64",
         "getegid", "getegid32",
@@ -68,7 +71,7 @@
         "lsetxattr",
         "lstat", "lstat64",
         "madvise",
-        "membarrier", "memfd_create", "memfd_secret",
+        "membarrier", "memfd_create",
         "mincore",
         "mkdir", "mkdirat",
         "mknod", "mknodat",
@@ -94,7 +97,6 @@
         "prctl",
         "pread64", "preadv", "preadv2",
         "prlimit64",
-        "process_mrelease",
         "pselect6", "pselect6_time64",
         "pwrite64", "pwritev", "pwritev2",
         "read", "readahead", "readlink", "readlinkat", "readv",
@@ -184,9 +186,8 @@
     },
     {
       "names": ["clone3"],
-      "action": "SCMP_ACT_ERRNO",
-      "errnoRet": 1,
-      "comment": "Block clone3 entirely"
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "Single allow rule for glibc 2.34+ threads. Do not also list clone3 in the blanket allow or deny it afterwards; conflicting rules make Docker reject the profile and fall back to an unconfined sandbox."
     }
   ]
 }

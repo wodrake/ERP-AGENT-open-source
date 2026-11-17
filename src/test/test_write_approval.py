@@ -154,6 +154,35 @@ class ApprovalRecordTests(unittest.TestCase):
         self.assertEqual(IDENTITY_NOTE, record["identity_note"])
         self.assertEqual(store.get("ap-fields")["tool_name"], "order_create")
 
+    def test_edit_result_drops_reviewer_notice_and_approval_id_is_unique(self):
+        from src.agent.approval_store import attach_erp_result, strip_reviewer_notice
+
+        notice = (
+            "Note: a human reviewer replaced this tool call before it ran. "
+            "Executed instead: order_create with arguments {}.\n\nTool response:\n"
+            '{"code": 200, "data": {"id": 1}}'
+        )
+        self.assertEqual(strip_reviewer_notice(notice), '{"code": 200, "data": {"id": 1}}')
+        self.assertNotIn("human reviewer", strip_reviewer_notice(notice))
+        store = MemoryApprovalStore()
+        set_approval_store(store)
+        pending = {
+            "approval_id": "ap-once-only",
+            "thread_id": "thread-1",
+            "tool_name": "order_create",
+            "args_snapshot": {},
+            "args_hash": "abc",
+            "risk_level": "high",
+            "requester_user_id": "buyer-1",
+            "requested_at": "2026-11-17T00:00:00",
+        }
+        record_decision(pending, decision="edit", edit_diff={"changed": {}}, approver_user_id="buyer-1")
+        again = record_decision(pending, decision="approve", edit_diff=None, approver_user_id="other")
+        self.assertEqual(len(store.records), 1)
+        self.assertEqual(again["decision"], "edit")
+        stored = attach_erp_result("ap-once-only", notice)
+        self.assertEqual(stored["erp_result"], '{"code": 200, "data": {"id": 1}}')
+
 
 class BusinessViewTests(unittest.TestCase):
     def test_order_card_fields(self):
@@ -218,6 +247,62 @@ class IdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已批准", json.loads(unknown)["message"])
         self.assertFalse(json.loads(missing)["written"])
         self.assertFalse(json.loads(unknown)["written"])
+
+        set_approval_store(MemoryApprovalStore())
+        record_decision({
+            "approval_id": "ap-rejected",
+            "thread_id": "mcp",
+            "tool_name": "order_create",
+            "args_snapshot": {},
+            "args_hash": "seed",
+            "risk_level": "high",
+            "requester_user_id": "buyer-1",
+            "requested_at": "2026-11-17T00:00:00",
+        }, decision="reject", edit_diff=None, approver_user_id="buyer-1")
+        with patch.object(order_tools, "erp_client", SimpleNamespace(post=post)):
+            rejected = await order_tools.order_create(payload, approval_id="ap-rejected")
+        self.assertEqual(erp.writes, 0)
+        self.assertFalse(json.loads(rejected)["written"])
+
+    async def test_every_mcp_write_tool_requires_approval_id(self):
+        from src.mcp_server.tools import inventory_tools, order_tools, parts_tools, suppliers_tools
+
+        set_idempotency_store(MemoryIdempotencyStore())
+        set_approval_store(MemoryApprovalStore())
+        erp = SimpleNamespace(writes=0)
+
+        async def post(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {}}
+
+        async def put(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {}}
+
+        async def patch_http(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {}}
+
+        client = SimpleNamespace(post=post, put=put, patch=patch_http)
+        payload = order_json(1, 10, 10)
+        calls = [
+            (order_tools, order_tools.order_create(payload, approval_id="")),
+            (order_tools, order_tools.order_update(1, payload, approval_id="")),
+            (order_tools, order_tools.order_update_status(1, 1, approval_id="")),
+            (inventory_tools, inventory_tools.inventory_inbound(1, 1, approval_id="")),
+            (inventory_tools, inventory_tools.inventory_outbound(1, 1, approval_id="")),
+            (suppliers_tools, suppliers_tools.supplier_create("S-1", "博世", approval_id="")),
+            (suppliers_tools, suppliers_tools.supplier_update_status(1, 0, approval_id="")),
+            (parts_tools, parts_tools.part_create("SP-001", "火花塞", 12.5, approval_id="")),
+        ]
+        self.assertGreaterEqual(len(calls), 8)
+        for module, coroutine in calls:
+            with patch.object(module, "erp_client", client):
+                result = await coroutine
+            body = json.loads(result)
+            self.assertFalse(body["written"], result)
+            self.assertIn("approval_id", body["message"])
+        self.assertEqual(erp.writes, 0)
 
     async def test_inconsistent_amount_does_not_call_erp(self):
         from src.mcp_server.tools import order_tools
@@ -571,18 +656,42 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
     async def test_bad_order_edit_is_rejected(self):
         from src.agent.approval_flow import resume_or_replay
 
-        self.queue(AIMessage(content="", tool_calls=[{"name": "order_create", "args": {"order_data": order_json(2, 25, 50)}, "id": "bad-edit"}]))
+        self.queue(
+            AIMessage(content="", tool_calls=[{"name": "order_create", "args": {"order_data": order_json(2, 25, 50)}, "id": "bad-edit"}]),
+            AIMessage(content="已按误差内的合计下单"),
+        )
         started = await self.agent.ainvoke({"messages": [HumanMessage(content="请创建订单")]}, self.config("bad-edit"))
         approval_id = started["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
-        rejected = await resume_or_replay(self.agent, self.config("bad-edit"), {
-            "approval_id": approval_id,
-            "decisions": [{"type": "edit", "edited_action": {
-                "name": "order_create",
-                "args": {"order_data": order_json(3, 25, 50), "approval_id": approval_id},
-            }}],
-        }, "bad-edit")
-        self.assertTrue(rejected["rejected"])
+
+        def edit(payload, *, approval=approval_id):
+            args = {"order_data": payload}
+            if approval is not None:
+                args["approval_id"] = approval
+            return {
+                "approval_id": approval_id,
+                "decisions": [{"type": "edit", "edited_action": {"name": "order_create", "args": args}}],
+            }
+
+        over = await resume_or_replay(self.agent, self.config("bad-edit"), edit(order_json(2, 25, 50.02)), "bad-edit")
+        self.assertTrue(over["rejected"])
+        self.assertIn("0.01", over["message"])
+        fractional = await resume_or_replay(self.agent, self.config("bad-edit"), edit(order_json(1.5, 10, 15)), "bad-edit")
+        self.assertTrue(fractional["rejected"])
+        self.assertIn("整数", fractional["message"])
+        missing = await resume_or_replay(
+            self.agent,
+            self.config("bad-edit"),
+            {"decisions": [{"type": "edit", "edited_action": {"name": "order_create", "args": {"order_data": order_json(2, 25, 50.01), "approval_id": approval_id}}}]},
+            "bad-edit",
+        )
+        self.assertTrue(missing["rejected"])
+        self.assertIn("approval_id", missing["message"])
         self.assertEqual(self.erp.writes, 0)
+
+        accepted = await resume_or_replay(self.agent, self.config("bad-edit"), edit(order_json(2, 25, 50.01)), "bad-edit")
+        self.assertFalse(accepted.get("rejected"))
+        self.assertEqual(self.erp.writes, 1)
+        self.assertIn("50.01", self.erp.calls[0]["order_data"])
 
 
 class PersistenceFallbackTests(unittest.IsolatedAsyncioTestCase):

@@ -46,6 +46,8 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: "9000"
       HTTP_TIMEOUT: "30"
+      HTTP_GET_ATTEMPT_TIMEOUT: "5"
+      HTTP_GET_DEADLINE_SECONDS: "12"
     command: ["python", "-m", "src.mcp_server.server_main"]
     ports:
       - "9000:9000"

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from src.api_view.api import chat
 from src.agent.backends.sandbox_manager import sandbox_manager
-from src.mcp_server.http_base import erp_client
+from src.mcp_server.http_base import erp_client, get_read_budget_seconds
 from src.mcp_server.tools.parts_tools import register_parts_tools
 
 
@@ -85,6 +85,49 @@ class ERPReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["code"], 503)
         self.assertEqual(result["error"], "connect_error")
         self.assertEqual(result["attempts"], 1)
+
+    async def test_default_get_budget_is_twelve_seconds(self):
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("HTTP_GET_ATTEMPT_TIMEOUT", "HTTP_GET_DEADLINE_SECONDS", "HTTP_GET_RETRY_BASE_SECONDS"):
+                os.environ.pop(key, None)
+            self.assertEqual(get_read_budget_seconds(), 12.0)
+
+    async def test_get_deadline_stops_before_another_full_timeout(self):
+        clock = {"t": 0.0}
+
+        class HangingClient(_TimeoutClient):
+            async def request(self, method, path, **kwargs):
+                timeout = kwargs.get("timeout")
+                seconds = float(timeout.read)
+                self.calls.append(seconds)
+                clock["t"] += seconds
+                raise httpx.ReadTimeout("simulated timeout")
+
+        erp_client._client = HangingClient()
+
+        def now():
+            return clock["t"]
+
+        async def sleep(seconds):
+            self._delays.append(seconds)
+            clock["t"] += seconds
+
+        with patch.dict(os.environ, {
+            "HTTP_GET_ATTEMPT_TIMEOUT": "5",
+            "HTTP_GET_DEADLINE_SECONDS": "12",
+            "HTTP_GET_RETRY_BASE_SECONDS": "0.2",
+        }):
+            with patch("src.mcp_server.http_base.time.monotonic", now):
+                with patch("src.mcp_server.http_base.asyncio.sleep", sleep):
+                    result = await erp_client.get("/api/parts/get/1")
+        self.assertEqual(result["error"], "timeout")
+        self.assertEqual(result["deadline_seconds"], 12.0)
+        self.assertLessEqual(clock["t"], 12.0 + 1e-9)
+        self.assertEqual(len(erp_client._client.calls), 3)
+        self.assertEqual(erp_client._client.calls[0], 5.0)
+        self.assertEqual(erp_client._client.calls[1], 5.0)
+        self.assertAlmostEqual(erp_client._client.calls[2], 1.4, places=6)
+        self.assertAlmostEqual(sum(erp_client._client.calls) + sum(self._delays), 12.0, places=6)
 
     async def test_part_query_timeout_reaches_sse_done(self):
         self.fake.calls.clear()

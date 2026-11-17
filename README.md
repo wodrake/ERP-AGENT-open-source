@@ -128,7 +128,7 @@ TYPESAFE_MODEL=jev-1.13.0
 | **数据库** | MongoDB (Motor/Pymongo) | 会话/消息/Store 持久化 |
 | **沙箱** | Docker SDK + 7 层安全防护 | 隔离代码执行环境 |
 | **图表** | Matplotlib + Pandas | 26 种图表生成 |
-| **语言** | Python 3.11+ / TypeScript | 后端 Python，前端 TypeScript |
+| **语言** | Python 3.12+ / TypeScript | 锁定依赖按 3.12 解析；沙箱镜像仍是 python:3.11-slim |
 
 ---
 
@@ -397,6 +397,10 @@ python tests/integration/test_mcp_process_recovery.py
 
 `GET /health/session` 默认关闭。只有设置 `ERP_SESSION_PROBE=1` 时才会构建会话并返回工具数，这个探针不调用模型。
 
+这套 compose 只适合本机开发：MongoDB 映射到宿主机 `27017` 且没有认证，前端容器跑的是 `next dev` 而不是生产构建。不要把它当成生产部署。`/health` 里 `mcp.status=ok` 只表示 MCP 进程能连上；会话如果还是 0 个工具，要看 `last_tool_count`。`sandbox.mode=state` 时状态可以是 ok，但不会在容器里执行代码。
+
+ERP 的 GET 最多再试 2 次，并且有总时间预算。默认单次尝试 5 秒（`HTTP_GET_ATTEMPT_TIMEOUT`），整次查询含重试不超过 12 秒（`HTTP_GET_DEADLINE_SECONDS`）。写操作不重试，仍使用 `HTTP_TIMEOUT`（默认 30 秒）一次。
+
 ### 可选：真 Docker 沙箱
 
 默认编排不把 Docker 套接字给后端。只有在受信任的开发机上，才叠加这个覆盖文件：
@@ -422,7 +426,7 @@ python scripts/run_tests.py
 
 ### 环境要求
 
-- Python 3.11+
+- Python 3.12+（`requirements.lock` 不能在 3.11 上安装；沙箱里跑用户代码的镜像仍是 `python:3.11-slim`）
 - Node.js 18+
 - MongoDB 6.0+
 - Docker Desktop（已启动）

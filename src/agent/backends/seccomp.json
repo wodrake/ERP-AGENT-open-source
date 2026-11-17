@@ -186,8 +186,9 @@
     },
     {
       "names": ["clone3"],
-      "action": "SCMP_ACT_ALLOW",
-      "comment": "Single allow rule for glibc 2.34+ threads. Do not also list clone3 in the blanket allow or deny it afterwards; conflicting rules make Docker reject the profile and fall back to an unconfined sandbox."
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38,
+      "comment": "ENOSYS. clone3 arguments are a pointer, so seccomp cannot filter CLONE_NEWUSER here. Returning ENOSYS makes glibc fall back to clone, which is masked against CLONE_NEWUSER."
     }
   ]
 }

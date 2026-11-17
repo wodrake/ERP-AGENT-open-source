@@ -23,6 +23,18 @@ class SeccompProfileTests(unittest.TestCase):
         payload = json.loads(option.removeprefix("seccomp="))
         self.assertEqual(payload["defaultErrnoRet"], 1)
 
+    def test_clone3_returns_enosys(self):
+        data = json.loads(seccomp_path().read_text(encoding="utf-8"))
+        rules = [rule for rule in data["syscalls"] if "clone3" in (rule.get("names") or [])]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["action"], "SCMP_ACT_ERRNO")
+        self.assertEqual(rules[0]["errnoRet"], 38)
+        self.assertNotIn("clone3", data["syscalls"][0]["names"])
+        self.assertFalse(any(
+            rule.get("action") == "SCMP_ACT_ALLOW" and "clone3" in (rule.get("names") or [])
+            for rule in data["syscalls"]
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

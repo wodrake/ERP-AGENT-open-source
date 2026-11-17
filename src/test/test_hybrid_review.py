@@ -1,6 +1,7 @@
 """Real graph regression suite for routing, escalation, grading and HITL."""
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
 
 from langchain.agents import create_agent
@@ -14,6 +15,7 @@ from deepagents.middleware.rubric import GraderResponse
 
 from src.agent.harness import HarnessPhaseMiddleware, load_harness_config
 from src.agent.review_policy import ReviewPolicy, ReviewRoute
+from src.agent.middlewares.json_grader import GraderUnavailable, parse_grader_response
 from src.agent.middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
 
 
@@ -36,6 +38,55 @@ def reviewer(result="satisfied"):
     r._write_reviewer._grade = Mock(return_value=verdict(result))
     r._write_reviewer._agrade = AsyncMock(return_value=verdict(result))
     return r
+
+
+class JsonGraderModel:
+    """记录 bind() 参数，并按预设文本返回 —— 模拟 DeepSeek 的 chat 接口。"""
+
+    def __init__(self, content, error=None):
+        self.content = content
+        self.error = error
+        self.bound = []
+
+    def bind(self, **kwargs):
+        self.bound.append(kwargs)
+        return self
+
+    def _reply(self):
+        if self.error:
+            raise self.error
+        return AIMessage(content=self.content)
+
+    def invoke(self, messages, config=None, **kwargs):
+        return self._reply()
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        return self._reply()
+
+
+class BrokenGrader:
+    """像 DeepSeek 对 json_schema 那样直接 400。"""
+
+    def __init__(self, error=None):
+        self.error = error or RuntimeError("Error code: 400 - This response_format type is unavailable now")
+        self.calls = 0
+
+    def bind(self, **kwargs):
+        return self
+
+    def invoke(self, messages, config=None, **kwargs):
+        self.calls += 1
+        raise self.error
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        self.calls += 1
+        raise self.error
+
+
+GRADED_JSON = (
+    '{"result": "needs_revision", "explanation": "订单未提交", '
+    '"criteria": [{"name": "写操作已触发审批", "passed": false, "gap": "没有调用 order_create"}]}'
+)
 
 
 class HybridReviewTests(unittest.TestCase):
@@ -196,6 +247,100 @@ class HybridReviewTests(unittest.TestCase):
         state = {**self.state("hello"), "_review_start": 0}
         state["messages"].append(ToolMessage(content="Error: offline", tool_call_id="err"))
         self.assertNotIn("rubric", ReviewExecutionGate(self.config).after_agent(state, None))
+
+
+class DeepSeekGraderCompatibilityTests(unittest.TestCase):
+    """DeepSeek 只支持 json_object；json_schema 会 400，审查不能因此中断主流程。"""
+
+    def setUp(self):
+        self.config = load_harness_config()
+
+    def state(self, text):
+        return {"messages": [HumanMessage(content=text)]}
+
+    def test_grader_asks_for_json_object_not_json_schema(self):
+        model = JsonGraderModel(GRADED_JSON)
+        middleware = SafeRubricMiddleware(model=model, max_iterations=2)
+        graded = middleware._grade({**self.state("分析报价"), "rubric": "1. 写操作必须经过审批"}, 0)
+        self.assertEqual(model.bound, [{"response_format": {"type": "json_object"}}])
+        self.assertEqual(graded.result, "needs_revision")
+        self.assertEqual(len(graded.criteria), 1)
+
+    def test_grader_payload_is_parsed_and_normalized(self):
+        graded = parse_grader_response(
+            '```json\n{"result": false, "explanation": "缺审批", "criteria": ['
+            '{"name": "审批", "passed": false, "gap": "未触发"}]}\n```'
+        )
+        self.assertEqual(graded.result, "needs_revision")
+        self.assertEqual(graded.criteria[0]["gap"], "未触发")
+        # result 与逐条判定矛盾时以逐条判定为准，避免一次字段笔误就降级
+        self.assertEqual(parse_grader_response(
+            '{"result": "satisfied", "explanation": "", "criteria": [{"name": "a", "passed": false, "gap": "x"}]}'
+        ).result, "needs_revision")
+
+    def test_unusable_grader_output_raises_grader_unavailable(self):
+        # 空 criteria 交给框架的覆盖度重试处理，这里只拒“拿不到判定”的输出
+        for payload in ("not json at all", '{"explanation": "no result"}', '{"result": "maybe"}'):
+            with self.assertRaises(GraderUnavailable):
+                parse_grader_response(payload)
+
+    def test_grader_error_skips_review_without_breaking_the_turn(self):
+        grader = BrokenGrader()
+        middleware = SafeRubricMiddleware(model=grader, max_iterations=2)
+        agent = create_agent(
+            model=ToolModel(responses=[AIMessage(content="报价分析完成")]),
+            middleware=[HarnessPhaseMiddleware(), middleware, ReviewExecutionGate(self.config)],
+        )
+        result = agent.invoke(self.state("分析报价"))
+        self.assertEqual(result["review_result"], None)
+        self.assertEqual(result["phase"], "result")
+        self.assertEqual(result["messages"][-1].content, "报价分析完成")
+        self.assertEqual(grader.calls, 1)
+
+    def test_write_interrupt_survives_grader_error_and_writes_once(self):
+        executed = []
+
+        @tool
+        def order_create() -> str:
+            """Create an order."""
+            executed.append(1)
+            return '{"success": true}'
+
+        grader = BrokenGrader()
+        middleware = SafeRubricMiddleware(model=grader, max_iterations=2)
+        model = ToolModel(responses=[
+            AIMessage(content="", tool_calls=[{"name": "order_create", "args": {}, "id": "w"}]),
+            AIMessage(content="已提交"),
+        ])
+        agent = create_agent(
+            model=model,
+            tools=[order_create],
+            checkpointer=InMemorySaver(),
+            middleware=[
+                HarnessPhaseMiddleware(),
+                middleware,
+                ReviewExecutionGate(self.config),
+                HumanInTheLoopMiddleware(interrupt_on={"order_create": True}),
+            ],
+        )
+
+        async def run():
+            config = {"configurable": {"thread_id": "grader-down"}}
+            first = await agent.ainvoke(self.state("给测试制动片0下采购单"), config)
+            self.assertTrue(first.get("__interrupt__"))
+            self.assertEqual(executed, [])
+            resumed = await agent.ainvoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+            self.assertEqual(executed, [1])
+            self.assertEqual(resumed["review_result"], None)
+            self.assertEqual(resumed["phase"], "result")
+
+        asyncio.run(run())
+
+    def test_sync_grader_error_also_skips(self):
+        middleware = SafeRubricMiddleware(model=BrokenGrader(), max_iterations=2)
+        runtime = SimpleNamespace(context=None)
+        update = middleware.after_agent({**self.state("分析报价"), "rubric": "1. x"}, runtime)
+        self.assertIsNone(update)
 
 
 if __name__ == "__main__":

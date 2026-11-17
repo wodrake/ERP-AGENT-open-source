@@ -24,8 +24,7 @@ interface Props {
   phaseLabel: string;
   onSend: (msg: string) => void;
   onSupplement: (text: string) => void;
-  onApprove: () => void;
-  onReject: () => void;
+  onResume: (resume: Record<string, unknown>) => void;
 }
 
 export default function ChatArea({
@@ -41,8 +40,7 @@ export default function ChatArea({
   phaseLabel,
   onSend,
   onSupplement,
-  onApprove,
-  onReject,
+  onResume,
 }: Props) {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const hasMessages = messages.length > 0;
@@ -84,8 +82,7 @@ export default function ChatArea({
         <InterruptBanner
           data={interruptData}
           onSupplement={onSupplement}
-          onApprove={onApprove}
-          onReject={onReject}
+          onResume={onResume}
         />
       )}
 

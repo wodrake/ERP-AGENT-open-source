@@ -6,59 +6,93 @@ import json
 from typing import Optional
 from fastmcp import FastMCP
 from ..http_base import erp_client
+from ..idempotency import run_idempotent
+from ..order_validation import validate_order_write
+
+
+def _json_error(message: str, code: int = 400) -> str:
+    return json.dumps(
+        {"code": code, "message": message, "validation_error": code == 400, "data": None},
+        ensure_ascii=False,
+    )
+
+
+def _parse_order_data(order_data):
+    try:
+        data = json.loads(order_data) if isinstance(order_data, str) else order_data
+    except json.JSONDecodeError as exc:
+        return None, _json_error(f"JSON解析失败: {exc}")
+    return data, None
+
+
+async def order_create(order_data: str, approval_id: str = "") -> str:
+    """创建采购订单。
+
+    Args:
+        order_data: 订单数据JSON字符串，格式：
+            {
+                "orderNumber": "PO20260101001",  // 必填，订单编号
+                "totalAmount": 1000.0,           // 总金额
+                "status": 0,                     // 状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
+                "remark": "备注",
+                "orderDetail": [                 // 订单明细列表
+                    {
+                        "partId": 1,            // 必填，零部件ID
+                        "quantity": 100,        // 必填，数量>=1
+                        "unitPrice": 25.5,      // 必填，单价
+                        "remark": "明细备注"
+                    }
+                ]
+            }
+        approval_id: 审批幂等键。由审批中断注入；同一键重复调用返回首次结果，不再写 ERP。留空则不去重。
+
+    Returns:
+        创建结果JSON，包含订单ID和完整订单信息
+    """
+    data, error = _parse_order_data(order_data)
+    if error:
+        return error
+    invalid = validate_order_write({"order_data": data}, tool_name="order_create")
+    if invalid:
+        return _json_error(invalid)
+
+    async def operation() -> str:
+        result = await erp_client.post("/api/orders/create", json_data=data)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "order_create", data, operation)
+
+
+async def order_update(id: int, order_data: str, approval_id: str = "") -> str:
+    """更新采购订单。
+
+    Args:
+        id: 订单ID
+        order_data: 更新的订单数据JSON字符串，格式同 order_create
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        更新结果JSON
+    """
+    data, error = _parse_order_data(order_data)
+    if error:
+        return error
+    invalid = validate_order_write({"order_data": data}, tool_name="order_update")
+    if invalid:
+        return _json_error(invalid)
+
+    async def operation() -> str:
+        result = await erp_client.put(f"/api/orders/update/{id}", json_data=data)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "order_update", {"id": id, "order": data}, operation)
 
 
 def register_order_tools(mcp: FastMCP):
     """注册采购订单管理工具到 MCP Server"""
 
-    @mcp.tool()
-    async def order_create(order_data: str) -> str:
-        """创建采购订单。
-
-        Args:
-            order_data: 订单数据JSON字符串，格式：
-                {
-                    "orderNumber": "PO20260101001",  // 必填，订单编号
-                    "totalAmount": 1000.0,           // 总金额
-                    "status": 0,                     // 状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
-                    "remark": "备注",
-                    "orderDetail": [                 // 订单明细列表
-                        {
-                            "partId": 1,            // 必填，零部件ID
-                            "quantity": 100,        // 必填，数量>=1
-                            "unitPrice": 25.5,      // 必填，单价
-                            "remark": "明细备注"
-                        }
-                    ]
-                }
-
-        Returns:
-            创建结果JSON，包含订单ID和完整订单信息
-        """
-        try:
-            data = json.loads(order_data) if isinstance(order_data, str) else order_data
-        except json.JSONDecodeError as e:
-            return json.dumps({"code": 400, "message": f"JSON解析失败: {e}", "data": None}, ensure_ascii=False)
-        result = await erp_client.post("/api/orders/create", json_data=data)
-        return json.dumps(result, ensure_ascii=False, indent=2)
-
-    @mcp.tool()
-    async def order_update(id: int, order_data: str) -> str:
-        """更新采购订单。
-
-        Args:
-            id: 订单ID
-            order_data: 更新的订单数据JSON字符串，格式同 order_create
-
-        Returns:
-            更新结果JSON
-        """
-        try:
-            data = json.loads(order_data) if isinstance(order_data, str) else order_data
-        except json.JSONDecodeError as e:
-            return json.dumps({"code": 400, "message": f"JSON解析失败: {e}", "data": None}, ensure_ascii=False)
-        result = await erp_client.put(f"/api/orders/update/{id}", json_data=data)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+    mcp.tool()(order_create)
+    mcp.tool()(order_update)
 
     @mcp.tool()
     async def order_page(
@@ -151,18 +185,25 @@ def register_order_tools(mcp: FastMCP):
         result = await erp_client.get("/api/orders/statistics", params=params)
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    @mcp.tool()
-    async def order_update_status(id: int, status: int) -> str:
-        """更新订单状态。
+    mcp.tool()(order_update_status)
 
-        Args:
-            id: 订单ID
-            status: 新状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
 
-        Returns:
-            操作结果JSON
-        """
+async def order_update_status(id: int, status: int, approval_id: str = "") -> str:
+    """更新订单状态。
+
+    Args:
+        id: 订单ID
+        status: 新状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        操作结果JSON
+    """
+
+    async def operation() -> str:
         result = await erp_client.patch(
             f"/api/orders/update-status/{id}", params={"status": status}
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "order_update_status", {"id": id, "status": status}, operation)

@@ -21,6 +21,8 @@ from .config import (
     MAX_MODEL_CALLS, MAX_TOOL_CALLS,
     SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS,
 )
+from .mcp_tools_bean import build_interrupt_on, enforce_write_tool_coverage
+from .middlewares.write_approval import WriteApprovalMiddleware
 from .schema import ProcurementContext
 from .log_utils import agent_logger
 from .memory.config import DEFAULT_MEMORY_CONFIG
@@ -184,6 +186,24 @@ async def precompute_agent_context(
     )
 
 
+def _append_guarded_general_purpose(subagents: list) -> None:
+    """默认通用子 Agent 会继承全部工具。显式挂上同一份写审批，避免绕过校验和幂等键。"""
+    if any(spec.get("name") == "general-purpose" for spec in subagents):
+        return
+    from deepagents.middleware.subagents import (
+        DEFAULT_GENERAL_PURPOSE_DESCRIPTION,
+        DEFAULT_SUBAGENT_PROMPT,
+    )
+
+    subagents.append({
+        "name": "general-purpose",
+        "description": DEFAULT_GENERAL_PURPOSE_DESCRIPTION,
+        "system_prompt": DEFAULT_SUBAGENT_PROMPT,
+        "middleware": [WriteApprovalMiddleware()],
+        "interrupt_on": build_interrupt_on(),
+    })
+
+
 def create_main_agent(
     user_context: Optional[ProcurementContext] = None,
     checkpointer=None,
@@ -265,6 +285,10 @@ def create_main_agent(
     from .tools.document_generator import generate_document, generate_table_report
 
     mcp_tools = load_mcp_tools_sync()
+    # 名字像写操作、却没有进入 WRITE_TOOLS 的 MCP 工具，默认拒绝启动。
+    enforce_write_tool_coverage([tool.name for tool in mcp_tools])
+    from ..mcp_server.persistence import warn_if_memory_fallback_enabled
+    warn_if_memory_fallback_enabled(agent_logger)
     custom_tools = [generate_chart, web_search, web_fetch, install_skill, list_user_skills, request_order_info,
                     download_sandbox_file, list_sandbox_files,
                     generate_document, generate_table_report]
@@ -294,6 +318,8 @@ def create_main_agent(
     subagent_configs = load_subagent_configs()
     subagents = resolve_subagent_tools(subagent_configs, all_tools)
     attach_to_subagents(subagents, skill_catalog, skill_read_tools)
+    # 放在 attach 之后，避免给通用子 Agent 写入残缺的 tools 键，从而丢掉继承来的全部工具。
+    _append_guarded_general_purpose(subagents)
     # 生成委派上下文协议（注入主 Agent 提示词）
     delegation_prompt = get_delegation_context_prompt(subagent_configs)
 
@@ -345,6 +371,8 @@ def create_main_agent(
         user_skills_restore_middleware.restore_now()
 
     middlewares = [
+        # 放在最外层：先改写不合法的订单调用并注入 approval_id，再进入 HITL。
+        WriteApprovalMiddleware(),
         # --- 自定义中间件（执行顺序 1→7）---
         SandboxHealthMiddleware(
             sandbox_manager=sandbox_manager_instance,

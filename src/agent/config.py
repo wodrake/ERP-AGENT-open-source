@@ -5,6 +5,7 @@ LLM、Store、Checkpointer、沙箱连接参数
 import os
 from langchain_deepseek import ChatDeepSeek
 from .env_utils import get_env, get_env_int
+from .mcp_tools_bean import build_interrupt_on
 
 # ============ LLM 配置 ============
 LLM_MODEL = get_env("LLM_MODEL", "deepseek-flash")
@@ -102,7 +103,5 @@ MAX_TOOL_CALLS = get_env_int("MAX_TOOL_CALLS", 30)
 SUMMARIZATION_THRESHOLD = 0.85  # 85% 上下文窗口时触发摘要
 
 # ============ 中断配置 ============
-INTERRUPT_ON_TOOLS = {
-    "order_create": {"allowed_decisions": ["approve", "reject"]},
-    "order_update": {"allowed_decisions": ["approve", "reject"]},
-}
+# 写工具只在 mcp_tools_bean.WRITE_TOOLS 声明一次，主 Agent 和子 Agent 都从那里生成。
+INTERRUPT_ON_TOOLS = build_interrupt_on()

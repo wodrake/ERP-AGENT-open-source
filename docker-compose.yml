@@ -48,10 +48,14 @@ services:
       HTTP_TIMEOUT: "30"
       HTTP_GET_ATTEMPT_TIMEOUT: "5"
       HTTP_GET_DEADLINE_SECONDS: "12"
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-erp_agent}
     command: ["python", "-m", "src.mcp_server.server_main"]
     ports:
       - "9000:9000"
     depends_on:
+      mongo:
+        condition: service_healthy
       mock-erp:
         condition: service_healthy
     healthcheck:

@@ -103,10 +103,12 @@ export function useChat() {
           break;
         }
 
-        case "interrupt":
+        case "interrupt": {
+          const raw = event as SSEEvent & { data?: InterruptData };
           setInterrupted(true);
-          setInterruptData(event.data);
+          setInterruptData(raw.data ?? (raw as unknown as InterruptData));
           break;
+        }
 
         case "thinking":
           if (event.status === "start") {

@@ -71,3 +71,8 @@ jobs:
 
       - name: MCP process recovery
         run: python tests/integration/test_mcp_process_recovery.py
+
+      - name: R1 approval tests including Mongo smoke
+        env:
+          R1_REQUIRE_MONGO: "1"
+        run: python -m unittest src.test.test_write_approval -q

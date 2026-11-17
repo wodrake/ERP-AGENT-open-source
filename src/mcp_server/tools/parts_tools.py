@@ -5,6 +5,7 @@ part_query / part_search / part_by_supplier / part_page
 import json
 from fastmcp import FastMCP
 from ..http_base import erp_client
+from ..idempotency import run_idempotent
 
 
 def register_parts_tools(mcp: FastMCP):
@@ -79,51 +80,59 @@ def register_parts_tools(mcp: FastMCP):
         result = await erp_client.get("/api/parts/page", params=params)
         return json.dumps(result, ensure_ascii=False, indent=2)
 
-    @mcp.tool()
-    async def part_create(
-        part_code: str,
-        name: str,
-        purchase_price: float,
-        model: str = None,
-        specification: str = None,
-        unit: str = None,
-        suggested_retail_price: float = None,
-        stock_warning_value: int = None,
-        supplier_id: int = None,
-        category: str = None,
-        description: str = None,
-    ) -> str:
-        """创建新零部件。
+    mcp.tool()(part_create)
 
-        Args:
-            part_code: 零件编码（必填）
-            name: 零件名称（必填）
-            purchase_price: 采购单价（必填，>=0）
-            model: 型号
-            specification: 规格
-            unit: 单位（个/套/件）
-            suggested_retail_price: 建议零售价
-            stock_warning_value: 库存预警值
-            supplier_id: 供应商ID
-            category: 分类
-            description: 描述
 
-        Returns:
-            创建结果JSON
-        """
-        data = {
-            "partCode": part_code,
-            "name": name,
-            "purchasePrice": purchase_price,
-            "model": model,
-            "specification": specification,
-            "unit": unit,
-            "suggestedRetailPrice": suggested_retail_price,
-            "stockWarningValue": stock_warning_value,
-            "supplierId": supplier_id,
-            "category": category,
-            "description": description,
-        }
-        data = {k: v for k, v in data.items() if v is not None}
+async def part_create(
+    part_code: str,
+    name: str,
+    purchase_price: float,
+    model: str = None,
+    specification: str = None,
+    unit: str = None,
+    suggested_retail_price: float = None,
+    stock_warning_value: int = None,
+    supplier_id: int = None,
+    category: str = None,
+    description: str = None,
+    approval_id: str = "",
+) -> str:
+    """创建新零部件。
+
+    Args:
+        part_code: 零件编码（必填）
+        name: 零件名称（必填）
+        purchase_price: 采购单价（必填，>=0）
+        model: 型号
+        specification: 规格
+        unit: 单位（个/套/件）
+        suggested_retail_price: 建议零售价
+        stock_warning_value: 库存预警值
+        supplier_id: 供应商ID
+        category: 分类
+        description: 描述
+        approval_id: 审批幂等键。同一键重复调用返回首次结果，不再写 ERP。
+
+    Returns:
+        创建结果JSON
+    """
+    data = {
+        "partCode": part_code,
+        "name": name,
+        "purchasePrice": purchase_price,
+        "model": model,
+        "specification": specification,
+        "unit": unit,
+        "suggestedRetailPrice": suggested_retail_price,
+        "stockWarningValue": stock_warning_value,
+        "supplierId": supplier_id,
+        "category": category,
+        "description": description,
+    }
+    data = {k: v for k, v in data.items() if v is not None}
+
+    async def operation() -> str:
         result = await erp_client.post("/api/parts/create", json_data=data)
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    return await run_idempotent(approval_id, "part_create", data, operation)

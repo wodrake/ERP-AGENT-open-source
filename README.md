@@ -18,6 +18,26 @@
 
 ---
 
+## 2026-11-18 更新：工程化基线（R4）与写操作安全闭环（R1）
+
+本次包含两项已完成的更新。R4 工程化基线已合并到 `main`（PR #5）；本分支（PR #6）在其上补齐写操作审批，并解决与 R4 的合并冲突。
+
+### R4 工程化基线（已合入 main）
+
+- 提供 `docker compose` 一键拉起 MongoDB、模拟 ERP、MCP、后端和前端；默认 `SANDBOX_BACKEND=state`，不挂载 `docker.sock`。真 Docker 沙箱见 `docker-compose.docker-sandbox.yml`。
+- 新增 GitHub Actions CI、前端 ESLint，以及 MIT 许可证。
+- 沙箱 seccomp 对 `clone3` 返回 `ENOSYS`，让 glibc 回退到受过滤的 `clone`；GET 请求重试加上总时长上限（默认 12 秒），超时返回结构化错误。
+
+### R1 写操作安全闭环
+
+- **写操作必须人工审批**：所有会修改 ERP 的工具（如 `order_create`）统一列入写工具清单，调用前一律触发人工审批中断；未经批准不会写入 ERP，拒绝则不写入。
+- **审批记录与幂等**：每次审批生成 `approval_id`，审批结果先写入 MongoDB，成功后才执行 ERP 写入；`approval_id` 建有唯一索引，同一审批不会重复下单。MongoDB 不可用时默认拒绝写入（fail-closed），恢复后再 resume 会先补记录再写。
+- **resume 校验**：`/resume` 必须携带当前这次中断的 `approval_id`，旧审批卡片无法批准同一会话里后来的新审批；编辑时不允许换工具或修改白名单以外的字段，修改后的订单仍需通过金额与数量（≥1 的整数）校验。
+- **MCP 层兜底**：MCP 写工具调用 ERP 前再次检查 `approval_id`，必须已有 approve 或 edit 记录，否则返回错误且 `written=false`。
+- **DeepSeek 审查兼容**：框架默认用 `response_format={"type": "json_schema"}` 请求 Grader 结构化结果，DeepSeek 返回 400 `This response_format type is unavailable now`，导致审查失败、对话提前结束、走不到写工具审批。现改为 `json_object` 请求并在本地解析为 `GraderResponse`（`src/agent/middlewares/json_grader.py`）；审查器出错时只记一条日志并跳过审查，不中断主流程与写工具审批。
+- **与 R4 的衔接**：沙箱选择复用 R4 的 `select_execution_backend`；MCP 同时保留 `/health` 与写工具启动自检；compose 中 MCP 服务接入 MongoDB；R1 审批测试并入 CI，不再单独使用 `r1-approval.yml`。
+- **验证**：在本地模拟 ERP（`ERP_BASE_URL=http://127.0.0.1:8081`）上实测：批准前停在审批且 ERP 无写入，`/resume` 批准后只创建一笔订单，拒绝时不写入；新增审查兼容测试，混合审查测试 21 项通过。
+
 ## 2026-10-23 更新：Langfuse 可观测性与真实模型验收
 
 - **可选元数据追踪**：新增 Langfuse 接入，默认关闭；缺少配置或依赖时业务照常执行。网页每次 stream/resume 生成独立 Trace，同一会话通过 HMAC 假名化的 session_id 关联，模型、工具与子链路按回调 run_id 建立父子关系。
@@ -225,9 +245,12 @@ python -m unittest src.test.test_hybrid_review -v
 ```
 
 ### 4. HITL 人工审批
-- 订单创建/更新触发 `interrupt_on` 中断
-- 前端展示审批卡片，用户批准后恢复执行
+- 全部 ERP 写操作（订单创建/修改/状态、出入库、供应商创建/状态、零件创建）执行前触发 `interrupt_on` 中断
+- 前端展示审批卡片（零件、数量、单价、合计、供应商、风险标签），可改数量或单价后批准；风险标签按操作类型划分，不是采购金额口径。订单数量必须是正整数
+- 恢复审批必须带上当前卡片的 approval_id。旧卡片不能批准同一会话里后来出现的新审批。编辑不能改工具，改完的订单仍要经过金额校验
+- 审批记录里的请求人和审批人目前取请求中的 `user_id`，并标注「未认证」。**多用户上线前必须完成 R2（身份认证）**
 - 缺少字段时触发信息补充中断
+- MongoDB 不可用时拒绝写 ERP。仅本地开发可设置 `APPROVAL_STORE_ALLOW_MEMORY=1` 退回进程内表，启动时会告警
 
 ### 5. 子Agent 委派
 - **procurement-analyst**：采购分析师（数据分析 + 图表生成）
@@ -460,8 +483,13 @@ LLM_BASE_URL=https://api.deepseek.com
 WEB_SEARCH_MODEL=deepseek-flash
 DEEPSEEK_RESPONSES_URL=https://api.deepseek.com/responses
 
-# MongoDB 连接
+# MongoDB 连接。写审批和幂等依赖它；连不上则拒绝写 ERP
 MONGODB_URI=mongodb://localhost:27017
+# 仅本地开发。设为 1 时，MongoDB 不可用才退回进程内表，并在启动时告警。
+# 多用户上线前必须完成 R2（身份认证），上线环境不要打开。
+# APPROVAL_STORE_ALLOW_MEMORY=1
+# 写工具清单自检默认拒绝启动。设为 0 则只告警。
+# WRITE_TOOL_AUDIT_STRICT=1
 
 # Java ERP 后端地址
 # 若没有自己的 ERP 服务，可先保留占位地址，联网搜索和基础对话仍可启动
@@ -554,7 +582,7 @@ MongoDB → Docker沙箱 → MCP Server(:9000) → Backend API(:8000) → Fronte
 预热池 → 认领 → MongoDB 缓存 → 新建 → 销毁。服务重启不丢失用户绑定关系，预热池保证 < 100ms 分配速度，健康检查 + 自动重建故障容器。
 
 ### 4. 完整的 HITL 审批流程
-订单创建/更新需人工审批，缺少字段时触发信息补充中断。基于 LangGraph 的 interrupt/resume 机制，前端展示审批卡片和信息补充表单。
+全部 ERP 写操作需人工审批，缺少字段时触发信息补充中断。基于 LangGraph 的 interrupt/resume 机制，前端展示审批卡片和信息补充表单。审批身份目前未认证，多用户上线前必须完成 R2（身份认证）。
 
 ### 5. 中间件栈
 沙箱健康检查、用户上下文注入（工厂模式防串扰）、技能增量同步、用户技能恢复、工具摘要监控、偏好自动提取、熔断器保护、调用限制。每个中间件都有明确的职责边界。

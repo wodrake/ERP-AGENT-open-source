@@ -62,13 +62,12 @@ export default function Home() {
     [chat]
   );
 
-  const handleApprove = useCallback(() => {
-    chat.resumeWith({ decisions: [{ type: "approve" }] });
-  }, [chat]);
-
-  const handleReject = useCallback(() => {
-    chat.resumeWith({ decisions: [{ type: "reject" }] });
-  }, [chat]);
+  const handleResume = useCallback(
+    (resume: Record<string, unknown>) => {
+      chat.resumeWith(resume);
+    },
+    [chat]
+  );
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -94,8 +93,7 @@ export default function Home() {
         phaseLabel={chat.phaseLabel}
         onSend={chat.sendMessage}
         onSupplement={handleSupplement}
-        onApprove={handleApprove}
-        onReject={handleReject}
+        onResume={handleResume}
       />
     </div>
   );

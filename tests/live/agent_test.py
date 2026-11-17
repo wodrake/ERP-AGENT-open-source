@@ -5,8 +5,11 @@
 import asyncio
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from agent.env_utils import load_env
 load_env()
@@ -114,4 +117,7 @@ async def main():
 
 
 if __name__ == "__main__":
+    if os.getenv("RUN_LIVE_TESTS") != "1":
+        print("skipped: set RUN_LIVE_TESTS=1 to run against live services")
+        raise SystemExit(0)
     asyncio.run(main())

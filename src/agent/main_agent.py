@@ -3,14 +3,13 @@
 DeepAgent 核心组装 — 严格遵循 Harness Engineering 架构
 """
 import io
-import os
 import tarfile
 import fnmatch
 from typing import Optional
 from pathlib import Path
 
 from deepagents import create_deep_agent, RubricMiddleware
-from deepagents.backends import CompositeBackend, StoreBackend, LocalShellBackend
+from deepagents.backends import CompositeBackend, StoreBackend
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
@@ -240,39 +239,25 @@ def create_main_agent(
 
     # ===== 2. Backend - Manager + Stable Proxy + CompositeBackend =====
     # Manager 负责用户级领取/恢复/重建；Proxy 保持 Agent 已持有的后端引用稳定。
-    sandbox_manager_instance = None
-    managed_sandbox = False
-    if os.getenv("SANDBOX_BACKEND", "").strip().lower() == "state":
-        from deepagents.backends import StateBackend
-        from .backends.sandbox_holder import set_sandbox
+    # Docker 不可用时默认拒绝宿主机 Shell（SANDBOX_ALLOW_LOCAL_FALLBACK=false）。
+    from .backends.sandbox_factory import fallback_backend, select_execution_backend
+    from .backends.sandbox_holder import set_sandbox
 
-        sandbox_backend = StateBackend()
-        set_sandbox(None, user_context.user_id)
-        agent_logger.info("Using StateBackend because SANDBOX_BACKEND=state")
-    else:
+    sandbox_backend, managed_sandbox, sandbox_manager_instance = select_execution_backend(
+        user_context.user_id
+    )
+    if managed_sandbox:
         try:
-            from .backends.sandbox_manager import sandbox_manager
-            from .backends.sandbox_proxy import SandboxBackendProxy
-            from .backends.sandbox_holder import set_sandbox
-
-            raw_sandbox = sandbox_manager.get_sandbox(user_context.user_id)
-            sandbox_backend = SandboxBackendProxy(raw_sandbox)
             bootstrap_sandbox(sandbox_backend)
-            sandbox_manager_instance = sandbox_manager
-            managed_sandbox = True
             # 注册的是稳定 Proxy，而不是会在重建后失效的原始 Docker 连接。
             set_sandbox(sandbox_backend, user_context.user_id)
-            agent_logger.info(
-                f"Using managed Docker sandbox for {user_context.user_id}: "
-                f"{sandbox_backend.container_name}"
-            )
-        except Exception as e:
-            agent_logger.warning(
-                f"Managed Docker sandbox unavailable ({e}), falling back to LocalShell"
-            )
-            sandbox_backend = LocalShellBackend(virtual_mode=True)
-            from .backends.sandbox_holder import set_sandbox
+        except Exception as exc:
+            managed_sandbox = False
+            sandbox_manager_instance = None
+            sandbox_backend = fallback_backend(exc)
             set_sandbox(None, user_context.user_id)
+    else:
+        set_sandbox(None, user_context.user_id)
 
     # deepagents >= 0.7 要求传入已初始化的 Backend 实例，
     # 不再接受旧版的 backend factory。

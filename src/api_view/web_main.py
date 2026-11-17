@@ -20,7 +20,7 @@ from .api.history import router as history_router
 from .web_config import close_mongo_client
 from ..agent.log_utils import web_logger
 from ..agent.backends.sandbox_manager import sandbox_manager
-from ..agent.config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS
+from ..agent.config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS, sandbox_backend_mode
 
 
 async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
@@ -51,11 +51,18 @@ async def lifespan(app: FastAPI):
     stop_event = asyncio.Event()
     maintenance_task = None
     try:
-        # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建并回退到 LocalShell。
-        await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
-        maintenance_task = asyncio.create_task(
-            _sandbox_maintenance(stop_event), name="sandbox-maintenance"
-        )
+        # state 模式不接触 Docker，CI 和 compose 默认走这条路径，不挂 docker.sock。
+        if sandbox_backend_mode() == "docker":
+            # 预热失败不阻止 Web 服务启动；是否回退宿主机由 SANDBOX_ALLOW_LOCAL_FALLBACK 决定。
+            try:
+                await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
+            except Exception as exc:
+                web_logger.warning(f"Sandbox warm pool skipped: {exc}")
+            maintenance_task = asyncio.create_task(
+                _sandbox_maintenance(stop_event), name="sandbox-maintenance"
+            )
+        else:
+            web_logger.info("SANDBOX_BACKEND=state; Docker warm pool is not started")
         yield
     finally:
         web_logger.info("Shutting down ERP Agent Web Server...")
@@ -116,7 +123,34 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from .health import collect_health
+
+    return await collect_health()
+
+
+def _session_probe_enabled() -> bool:
+    return os.getenv("ERP_SESSION_PROBE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.get("/health/session")
+async def session_probe(user_id: str = "mcp-recovery"):
+    """测试探针：构建或复用用户会话并返回 MCP 工具数。
+
+    默认关闭。集成测试设置 ERP_SESSION_PROBE=1 后，用它观察降级会话是否在
+    TTL 后重建，而不调用大模型。
+    """
+    if not _session_probe_enabled():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="session probe disabled")
+    from .agent_loader import agent_loader
+
+    session = await agent_loader.get_session(user_id, "probe")
+    return {
+        "user_id": session.user_id,
+        "mcp_tool_count": session.mcp_tool_count,
+        "degraded": session.degraded,
+        "pid": os.getpid(),
+    }
 
 
 if __name__ == "__main__":

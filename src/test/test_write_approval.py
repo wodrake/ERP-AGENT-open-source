@@ -35,6 +35,21 @@ from src.mcp_server.idempotency import MemoryIdempotencyStore, set_idempotency_s
 from src.mcp_server.order_validation import validate_order_write
 
 
+def _seed_approved(approval_id, tool_name="order_create"):
+    from src.agent.approval_store import record_decision
+    set_approval_store(MemoryApprovalStore())
+    record_decision({
+        "approval_id": approval_id,
+        "thread_id": "mcp",
+        "tool_name": tool_name,
+        "args_snapshot": {},
+        "args_hash": "seed",
+        "risk_level": "high",
+        "requester_user_id": "buyer-1",
+        "requested_at": "2026-11-17T00:00:00",
+    }, decision="approve", edit_diff=None, approver_user_id="buyer-1")
+
+
 def order_json(quantity, price, total, number="PO-TEST-1"):
     return json.dumps({
         "orderNumber": number,
@@ -101,6 +116,7 @@ class OrderValidationTests(unittest.TestCase):
         ok = {"order_data": order_json(2, 25, 50)}
         self.assertIsNone(validate_order_write(ok))
         self.assertIsNone(validate_order_write({"order_data": order_json(2, 25, 50.01)}))
+        self.assertIn("整数", validate_order_write({"order_data": order_json(1.5, 10, 15)}))
         self.assertIn("0.01", validate_order_write({"order_data": order_json(2, 25, 50.02)}))
         self.assertIn("quantity", validate_order_write({"order_data": order_json(0, 25, 0)}))
         self.assertIn("unitPrice", validate_order_write({"order_data": order_json(2, 0, 0)}))
@@ -172,6 +188,7 @@ class IdempotencyTests(unittest.IsolatedAsyncioTestCase):
             return {"code": 200, "data": {"id": 1, "echo": json_data}}
 
         payload = order_json(2, 25, 50)
+        _seed_approved("ap-once")
         with patch.object(order_tools, "erp_client", SimpleNamespace(post=post)):
             first = await order_tools.order_create(payload, approval_id="ap-once")
             second = await order_tools.order_create(payload, approval_id="ap-once")
@@ -180,6 +197,27 @@ class IdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertEqual(second, third)
         self.assertNotIn("validation_error", first)
+
+    async def test_mcp_refuses_write_without_approved_record(self):
+        from src.mcp_server.tools import order_tools
+
+        set_idempotency_store(MemoryIdempotencyStore())
+        set_approval_store(MemoryApprovalStore())
+        erp = SimpleNamespace(writes=0)
+
+        async def post(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {}}
+
+        payload = order_json(2, 25, 50)
+        with patch.object(order_tools, "erp_client", SimpleNamespace(post=post)):
+            missing = await order_tools.order_create(payload, approval_id="")
+            unknown = await order_tools.order_create(payload, approval_id="not-approved")
+        self.assertEqual(erp.writes, 0)
+        self.assertIn("approval_id", json.loads(missing)["message"])
+        self.assertIn("已批准", json.loads(unknown)["message"])
+        self.assertFalse(json.loads(missing)["written"])
+        self.assertFalse(json.loads(unknown)["written"])
 
     async def test_inconsistent_amount_does_not_call_erp(self):
         from src.mcp_server.tools import order_tools
@@ -234,7 +272,6 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         from langchain_core.tools import StructuredTool
-        from deepagents.backends import StateBackend
         from src.agent import main_agent as main
         from src.agent.harness import load_harness_config
         from src.agent.schema import ProcurementContext
@@ -288,18 +325,24 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
             config.setdefault("review", {})["mode"] = "never"
             return config
 
-        manager = SimpleNamespace(get_sandbox=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no docker")))
-        with patch.dict("sys.modules", {"src.agent.backends.sandbox_manager": SimpleNamespace(sandbox_manager=manager)}):
-            with patch.object(main, "LocalShellBackend", lambda **kwargs: StateBackend()):
-                with patch("src.agent.tools.mcp_client.load_mcp_tools_sync", return_value=tools):
-                    with patch.object(main, "get_llm", return_value=cls.model):
-                        with patch("src.agent.jev_router.build_review_router", return_value=cls.model):
-                            with patch("src.agent.harness.load_harness_config", quiet_config):
-                                cls.agent = main.create_main_agent(
-                                    ProcurementContext(user_id="buyer-1", username="测试采购员"),
-                                    InMemorySaver(),
-                                    InMemoryStore(),
-                                )
+        previous_backend = os.environ.get("SANDBOX_BACKEND")
+        os.environ["SANDBOX_BACKEND"] = "state"
+        cls._previous_backend = previous_backend
+        try:
+            with patch("src.agent.tools.mcp_client.load_mcp_tools_sync", return_value=tools):
+                with patch.object(main, "get_llm", return_value=cls.model):
+                    with patch("src.agent.jev_router.build_review_router", return_value=cls.model):
+                        with patch("src.agent.harness.load_harness_config", quiet_config):
+                            cls.agent = main.create_main_agent(
+                                ProcurementContext(user_id="buyer-1", username="测试采购员"),
+                                InMemorySaver(),
+                                InMemoryStore(),
+                            )
+        finally:
+            if previous_backend is None:
+                os.environ.pop("SANDBOX_BACKEND", None)
+            else:
+                os.environ["SANDBOX_BACKEND"] = previous_backend
 
     def setUp(self):
         self.erp.writes = 0
@@ -379,7 +422,7 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
         first = await self.agent.ainvoke({"messages": [HumanMessage(content="请出库")]}, config)
         approval_id = first["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
         self.assertEqual(self.erp.writes, 0)
-        resume = {"decisions": [{"type": "approve"}]}
+        resume = {"approval_id": approval_id, "decisions": [{"type": "approve"}]}
         results = [await resume_or_replay(self.agent, config, resume, "resume-3") for _ in range(3)]
         self.assertEqual(self.erp.writes, 1)
         self.assertFalse(results[0]["replayed"])
@@ -400,7 +443,7 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.queue(AIMessage(content="", tool_calls=[{"name": "order_create", "args": {"order_data": order_json(2, 25, 50)}, "id": "rej-1"}]))
         rejected = await self.agent.ainvoke({"messages": [HumanMessage(content="请创建订单")]}, self.config("reject-1"))
         reject_id = rejected["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
-        await resume_or_replay(self.agent, self.config("reject-1"), {"decisions": [{"type": "reject"}]}, "reject-1")
+        await resume_or_replay(self.agent, self.config("reject-1"), {"approval_id": reject_id, "decisions": [{"type": "reject"}]}, "reject-1")
         self.assertEqual(self.erp.writes, 0)
         reject_record = get_approval_store().get(reject_id)
         self.assertEqual(reject_record["decision"], "reject")
@@ -415,17 +458,131 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
         original = edited["__interrupt__"][0].value["action_requests"][0]["args"]
         edit_id = original["approval_id"]
         revised = order_json(3, 25, 75)
-        await resume_or_replay(self.agent, self.config("edit-1"), {"decisions": [{
-            "type": "edit",
-            "edited_action": {"name": "order_create", "args": {"order_data": revised, "approval_id": edit_id}},
-        }]}, "edit-1")
+        await resume_or_replay(self.agent, self.config("edit-1"), {
+            "approval_id": edit_id,
+            "decisions": [{
+                "type": "edit",
+                "edited_action": {"name": "order_create", "args": {"order_data": revised, "approval_id": edit_id}},
+            }],
+        }, "edit-1")
         self.assertEqual(self.erp.writes, 1)
         self.assertIn('"quantity": 3', self.erp.calls[0]["order_data"])
         edit_record = get_approval_store().get(edit_id)
         self.assertEqual(edit_record["decision"], "edit")
         self.assertTrue(edit_record["edit_diff"]["changed"])
+        self.assertNotIn("human reviewer", edit_record.get("erp_result") or "")
         for field in APPROVAL_FIELDS:
             self.assertIn(field, edit_record)
+
+    async def test_mongo_blip_then_recovery_writes_only_with_record(self):
+        from src.agent.approval_flow import resume_or_replay
+        from src.agent.approval_store import MemoryApprovalStore, get_approval_store
+        from src.mcp_server.persistence import ApprovalPersistenceUnavailable
+
+        class Flaky(MemoryApprovalStore):
+            def __init__(self):
+                super().__init__()
+                self.failures = 1
+
+            def record(self, doc):
+                if self.failures:
+                    self.failures -= 1
+                    raise ApprovalPersistenceUnavailable("MongoDB 不可用，已拒绝写入 ERP。")
+                return super().record(doc)
+
+        store = Flaky()
+        set_approval_store(store)
+        self.queue(
+            AIMessage(content="", tool_calls=[{"name": "inventory_outbound", "args": {"part_id": 3, "quantity": 2}, "id": "flaky-1"}]),
+            AIMessage(content="出库完成"),
+        )
+        config = self.config("mongo-blip")
+        first = await self.agent.ainvoke({"messages": [HumanMessage(content="请出库")]}, config)
+        approval_id = first["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
+        resume = {"approval_id": approval_id, "decisions": [{"type": "approve"}]}
+        with self.assertRaises(ApprovalPersistenceUnavailable):
+            await resume_or_replay(self.agent, config, resume, "mongo-blip")
+        self.assertEqual(self.erp.writes, 0)
+        self.assertIsNone(store.get(approval_id))
+        recovered = await resume_or_replay(self.agent, config, resume, "mongo-blip")
+        self.assertFalse(recovered.get("rejected"))
+        self.assertEqual(self.erp.writes, 1)
+        record = get_approval_store().get(approval_id)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["decision"], "approve")
+        self.assertEqual(record["tool_name"], "inventory_outbound")
+
+    async def test_edit_cannot_change_tool_or_drop_approval_id(self):
+        from src.agent.approval_flow import resume_or_replay
+
+        self.queue(AIMessage(content="", tool_calls=[{"name": "inventory_inbound", "args": {"part_id": 3, "quantity": 2}, "id": "edit-guard"}]))
+        started = await self.agent.ainvoke({"messages": [HumanMessage(content="请入库")]}, self.config("edit-guard"))
+        approval_id = started["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
+        renamed = await resume_or_replay(self.agent, self.config("edit-guard"), {
+            "approval_id": approval_id,
+            "decisions": [{"type": "edit", "edited_action": {"name": "inventory_outbound", "args": {"part_id": 3, "quantity": 2, "approval_id": approval_id}}}],
+        }, "edit-guard")
+        self.assertTrue(renamed["rejected"])
+        self.assertEqual(self.erp.writes, 0)
+        missing = await resume_or_replay(self.agent, self.config("edit-guard"), {
+            "approval_id": approval_id,
+            "decisions": [{"type": "edit", "edited_action": {"name": "inventory_inbound", "args": {"part_id": 3, "quantity": 4}}}],
+        }, "edit-guard")
+        self.assertTrue(missing["rejected"])
+        self.assertIn("approval_id", missing["message"])
+        self.assertEqual(self.erp.writes, 0)
+        changed_part = await resume_or_replay(self.agent, self.config("edit-guard"), {
+            "approval_id": approval_id,
+            "decisions": [{"type": "edit", "edited_action": {"name": "inventory_inbound", "args": {"part_id": 9, "quantity": 2, "approval_id": approval_id}}}],
+        }, "edit-guard")
+        self.assertTrue(changed_part["rejected"])
+        accepted = await resume_or_replay(self.agent, self.config("edit-guard"), {
+            "approval_id": approval_id,
+            "decisions": [{"type": "edit", "edited_action": {"name": "inventory_inbound", "args": {"part_id": 3, "quantity": 6, "approval_id": approval_id}}}],
+        }, "edit-guard")
+        self.assertFalse(accepted.get("rejected"))
+        self.assertEqual(self.erp.writes, 1)
+        self.assertEqual(self.erp.calls[0]["quantity"], 6)
+
+    async def test_stale_approval_cannot_approve_a_newer_interrupt(self):
+        from src.agent.approval_flow import resume_or_replay
+
+        self.queue(
+            AIMessage(content="", tool_calls=[{"name": "inventory_outbound", "args": {"part_id": 3, "quantity": 1}, "id": "old-call"}]),
+            AIMessage(content="第一笔完成"),
+            AIMessage(content="", tool_calls=[{"name": "inventory_inbound", "args": {"part_id": 3, "quantity": 2}, "id": "new-call"}]),
+            AIMessage(content="第二笔完成"),
+        )
+        config = self.config("stale-card")
+        first = await self.agent.ainvoke({"messages": [HumanMessage(content="请出库")]}, config)
+        old_id = first["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
+        await resume_or_replay(self.agent, config, {"approval_id": old_id, "decisions": [{"type": "approve"}]}, "stale-card")
+        self.assertEqual(self.erp.writes, 1)
+        second = await self.agent.ainvoke({"messages": [HumanMessage(content="请入库")]}, config)
+        new_id = second["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
+        self.assertNotEqual(old_id, new_id)
+        stale = await resume_or_replay(self.agent, config, {"approval_id": old_id, "decisions": [{"type": "approve"}]}, "stale-card")
+        self.assertTrue(stale["rejected"])
+        self.assertEqual(self.erp.writes, 1)
+        fresh = await resume_or_replay(self.agent, config, {"approval_id": new_id, "decisions": [{"type": "approve"}]}, "stale-card")
+        self.assertFalse(fresh.get("rejected"))
+        self.assertEqual(self.erp.writes, 2)
+
+    async def test_bad_order_edit_is_rejected(self):
+        from src.agent.approval_flow import resume_or_replay
+
+        self.queue(AIMessage(content="", tool_calls=[{"name": "order_create", "args": {"order_data": order_json(2, 25, 50)}, "id": "bad-edit"}]))
+        started = await self.agent.ainvoke({"messages": [HumanMessage(content="请创建订单")]}, self.config("bad-edit"))
+        approval_id = started["__interrupt__"][0].value["action_requests"][0]["args"]["approval_id"]
+        rejected = await resume_or_replay(self.agent, self.config("bad-edit"), {
+            "approval_id": approval_id,
+            "decisions": [{"type": "edit", "edited_action": {
+                "name": "order_create",
+                "args": {"order_data": order_json(3, 25, 50), "approval_id": approval_id},
+            }}],
+        }, "bad-edit")
+        self.assertTrue(rejected["rejected"])
+        self.assertEqual(self.erp.writes, 0)
 
 
 class PersistenceFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -470,6 +627,7 @@ class PersistenceFallbackTests(unittest.IsolatedAsyncioTestCase):
         from src.mcp_server.tools import order_tools
 
         os.environ["APPROVAL_STORE_ALLOW_MEMORY"] = "1"
+        _seed_approved("ap-mem")
         erp = SimpleNamespace(writes=0)
 
         async def post(*args, **kwargs):
@@ -546,6 +704,9 @@ class MongoApprovalSmokeTests(unittest.TestCase):
                 "erp_result": None,
                 "identity_note": IDENTITY_NOTE,
             })
+            indexes = client[db_name]["approvals"].index_information()
+            unique = [spec for spec in indexes.values() if spec.get("key") == [("approval_id", 1)] and spec.get("unique")]
+            self.assertTrue(unique)
             approvals.record(doc)
             approvals.attach_result(approval_id, "{\"code\":200}")
             loaded = approvals.get(approval_id)

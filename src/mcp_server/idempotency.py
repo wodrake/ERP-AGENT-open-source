@@ -175,8 +175,12 @@ async def run_idempotent(
         mcp_logger.error(str(exc))
         return _refused(str(exc))
     approval_id = effective_approval_id(approval_id)
-    if not approval_id:
-        return await operation()
+    from ..agent.approval_store import write_authorization
+
+    denied = write_authorization(approval_id, tool_name)
+    if denied:
+        mcp_logger.error(denied)
+        return _refused(denied)
     cached = store.replay(approval_id)
     if cached is not None:
         mcp_logger.info(f"幂等命中，跳过 ERP 写入: {tool_name} {approval_id}")

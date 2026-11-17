@@ -73,8 +73,8 @@ def validate_order_write(args: dict | None, *, tool_name: str = "order_create") 
             return f"明细第{index}行不是对象"
         quantity = _as_decimal(line.get("quantity", line.get("qty")))
         price = _as_decimal(line.get("unitPrice", line.get("unit_price")))
-        if quantity is None or quantity < 1:
-            return f"明细第{index}行 quantity 必须 >= 1"
+        if quantity is None or quantity != quantity.to_integral_value() or quantity < 1:
+            return f"明细第{index}行 quantity 必须是大于等于 1 的整数"
         if price is None or price <= 0:
             return f"明细第{index}行 unitPrice 必须 > 0"
         total += quantity * price

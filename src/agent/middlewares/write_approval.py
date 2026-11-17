@@ -24,15 +24,18 @@ from ..approval_store import (
     build_edit_diff,
     canonical_snapshot,
     get_approval_store,
+    peek_pending_by_call,
     pop_pending_by_call,
     record_decision,
     remember_pending,
+    write_authorization,
 )
 from ..log_utils import agent_logger
 from ..mcp_tools_bean import WRITE_TOOLS
 from ..tools.write_validation import report_write_validation_error
 from ...mcp_server.idempotency import bind_approval_id, get_idempotency_store, reset_approval_id
 from ...mcp_server.persistence import ApprovalPersistenceUnavailable
+from ..resume_validation import validate_decision
 from ...mcp_server.order_validation import ORDER_WRITE_TOOLS, validate_order_write
 
 VALIDATION_TOOL = report_write_validation_error.name
@@ -135,7 +138,7 @@ class WriteApprovalMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         approval_id = str((request.tool_call.get("args") or {}).get("approval_id") or "")
         name = request.tool_call.get("name")
-        blocked = _blocked_write(name, request.tool_call.get("id"))
+        blocked = _blocked_write(name, request.tool_call.get("id"), approval_id)
         if blocked is not None:
             return blocked
         if name in WRITE_TOOLS and approval_id:
@@ -153,7 +156,16 @@ class WriteApprovalMiddleware(AgentMiddleware):
         return result
 
 
-def _blocked_write(name: str | None, tool_call_id: str | None):
+def _error_message(name: str | None, tool_call_id: str | None, message: str):
+    return ToolMessage(
+        content=json.dumps({"code": 403, "message": message, "written": False}, ensure_ascii=False),
+        tool_call_id=tool_call_id,
+        name=name,
+        status="error",
+    )
+
+
+def _blocked_write(name: str | None, tool_call_id: str | None, approval_id: str = ""):
     if name not in WRITE_TOOLS:
         return None
     try:
@@ -161,19 +173,18 @@ def _blocked_write(name: str | None, tool_call_id: str | None):
         get_approval_store()
     except ApprovalPersistenceUnavailable as exc:
         agent_logger.error(str(exc))
-        return ToolMessage(
-            content=json.dumps({"code": 503, "message": str(exc), "written": False}, ensure_ascii=False),
-            tool_call_id=tool_call_id,
-            name=name,
-            status="error",
-        )
+        return _error_message(name, tool_call_id, str(exc))
+    denied = write_authorization(approval_id, name)
+    if denied:
+        agent_logger.error(denied)
+        return _error_message(name, tool_call_id, denied)
     return None
 
 
 def _guard_tool(request, handler):
     approval_id = str((request.tool_call.get("args") or {}).get("approval_id") or "")
     name = request.tool_call.get("name")
-    blocked = _blocked_write(name, request.tool_call.get("id"))
+    blocked = _blocked_write(name, request.tool_call.get("id"), approval_id)
     if blocked is not None:
         return blocked
     if name in WRITE_TOOLS and approval_id:
@@ -191,7 +202,7 @@ def _guard_tool(request, handler):
     return result
 
 
-def _record_decisions(state) -> None:
+def _record_decisions(state) -> dict | None:
     messages = state.get("messages") or []
     ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage) and message.tool_calls), None)
     if ai_message is None:
@@ -199,25 +210,49 @@ def _record_decisions(state) -> None:
     edited = state.get("hitl_edited_tool_calls") or {}
     rejected = _rejected_ids(messages, ai_message)
     _thread_id, user_id = _runtime_identity()
+    errors = []
     for call in ai_message.tool_calls:
-        pending = pop_pending_by_call(call.get("id"))
+        # 先看 pending，落库成功后再弹出。写失败时保留它，Mongo 恢复后可以重试。
+        pending = peek_pending_by_call(call.get("id"))
         if not pending:
             continue
         call_id = call.get("id")
-        if call_id in rejected:
-            record_decision(pending, decision="reject", edit_diff=None, approver_user_id=user_id)
-            continue
-        if call_id in edited:
-            edited_args = canonical_snapshot((edited[call_id] or {}).get("args") or {})
-            record_decision(
-                pending,
-                decision="edit",
-                edit_diff=build_edit_diff(pending["args_snapshot"], edited_args),
-                approver_user_id=user_id,
-            )
-            continue
-        record_decision(pending, decision="approve", edit_diff=None, approver_user_id=user_id)
+        try:
+            if call_id in rejected:
+                record_decision(pending, decision="reject", edit_diff=None, approver_user_id=user_id)
+            elif call_id in edited:
+                edited_action = edited[call_id] or {}
+                error = validate_decision(pending_action(pending), {
+                    "type": "edit",
+                    "edited_action": edited_action,
+                })
+                if error:
+                    errors.append(_error_message(call.get("name"), call_id, error))
+                    pop_pending_by_call(call_id)
+                    continue
+                edited_args = canonical_snapshot(edited_action.get("args") or {})
+                record_decision(
+                    pending,
+                    decision="edit",
+                    edit_diff=build_edit_diff(pending["args_snapshot"], edited_args),
+                    approver_user_id=user_id,
+                )
+            else:
+                record_decision(pending, decision="approve", edit_diff=None, approver_user_id=user_id)
+        except ApprovalPersistenceUnavailable:
+            raise
+        pop_pending_by_call(call_id)
+    if errors:
+        return {"messages": errors}
     return None
+
+
+def pending_action(pending: dict) -> dict:
+    return {
+        "name": pending["tool_name"],
+        "args": pending.get("args_snapshot") or {},
+        "approval_id": pending["approval_id"],
+    }
 
 
 def _rejected_ids(messages, ai_message) -> set[str]:

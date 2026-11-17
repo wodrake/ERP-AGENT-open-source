@@ -238,6 +238,7 @@ export function buildResume(view: BusinessView, decision: "approve" | "reject", 
   if (!view.actions.length) {
     return { decisions: [{ type: decision }] };
   }
+  const approvalIds = view.actions.map((action) => action.approvalId).filter(Boolean);
   const decisions = view.actions.map((action, index) => {
     const original = action.lines;
     const next = drafts[index] || original;
@@ -247,5 +248,9 @@ export function buildResume(view: BusinessView, decision: "approve" | "reject", 
     }
     return { type: "approve" };
   });
-  return { decisions };
+  return {
+    approval_id: approvalIds[0],
+    approval_ids: approvalIds,
+    decisions,
+  };
 }

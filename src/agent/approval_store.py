@@ -103,6 +103,9 @@ class MemoryApprovalStore:
         self.records: list[dict] = []
 
     def record(self, doc: dict) -> dict:
+        existing = self.get(doc.get("approval_id"))
+        if existing:
+            return existing
         stored = dict(doc)
         self.records.append(stored)
         return dict(stored)
@@ -134,12 +137,20 @@ class MemoryApprovalStore:
 class MongoApprovalStore:
     def __init__(self, client, db_name: str, collection_name: str = "approvals") -> None:
         self._col = client[db_name][collection_name]
-        self._col.create_index("approval_id")
+        _ensure_unique_approval_id(self._col)
         self._col.create_index([("thread_id", 1), ("decided_at", 1)])
 
     def record(self, doc: dict) -> dict:
+        from pymongo.errors import DuplicateKeyError
+
         stored = dict(doc)
-        self._col.insert_one(stored)
+        try:
+            self._col.insert_one(stored)
+        except DuplicateKeyError:
+            existing = self.get(doc.get("approval_id"))
+            if existing:
+                return existing
+            raise
         return dict(doc)
 
     def attach_result(self, approval_id: str, erp_result: Any) -> dict | None:
@@ -160,6 +171,24 @@ class MongoApprovalStore:
             if is_terminal(doc):
                 found = doc
         return _public_doc(found)
+
+
+def _ensure_unique_approval_id(collection) -> None:
+    """approval_id 必须唯一。旧的非唯一索引先删掉再重建。"""
+    for name, spec in collection.index_information().items():
+        if spec.get("key") == [("approval_id", 1)] and not spec.get("unique"):
+            collection.drop_index(name)
+    collection.create_index("approval_id", unique=True, name="approval_id_unique")
+
+
+def strip_reviewer_notice(text: str) -> str:
+    """去掉 HITL 加在工具结果前面的编辑说明，审计里只留 ERP 返回。"""
+    marker = "\n\nTool response:\n"
+    if marker in text:
+        return text.split(marker, 1)[1]
+    if text.startswith("Note: a human reviewer"):
+        return ""
+    return text
 
 
 def _public_doc(doc: dict | None) -> dict | None:
@@ -213,6 +242,24 @@ def remember_pending(pending: dict) -> None:
         _pending_by_call[tool_call_id] = approval_id
 
 
+def peek_pending_by_call(tool_call_id: str | None) -> dict | None:
+    if not tool_call_id:
+        return None
+    approval_id = _pending_by_call.get(tool_call_id)
+    if not approval_id:
+        return None
+    pending = _pending.get(approval_id)
+    return dict(pending) if pending else None
+
+
+def unrecorded_pending_ids(thread_id: str) -> set[str]:
+    return {
+        pending["approval_id"]
+        for pending in _pending.values()
+        if pending.get("thread_id") == thread_id and pending.get("approval_id")
+    }
+
+
 def pop_pending_by_call(tool_call_id: str | None) -> dict | None:
     if not tool_call_id:
         return None
@@ -252,7 +299,28 @@ def record_decision(pending: dict, *, decision: str, edit_diff: dict | None, app
 def attach_erp_result(approval_id: str, erp_result: Any) -> dict | None:
     if not approval_id:
         return None
+    if isinstance(erp_result, str):
+        erp_result = strip_reviewer_notice(erp_result)
     return get_approval_store().attach_result(approval_id, erp_result)
+
+
+def write_authorization(approval_id: str, tool_name: str) -> str | None:
+    """写 ERP 之前确认这条审批已经落库。返回错误文案；None 表示可以写。"""
+    if not str(approval_id or "").strip():
+        return "缺少 approval_id，已拒绝写入 ERP"
+    try:
+        record = get_approval_store().get(approval_id)
+    except Exception as exc:
+        from ..mcp_server.persistence import ApprovalPersistenceUnavailable
+
+        if isinstance(exc, ApprovalPersistenceUnavailable):
+            return str(exc)
+        raise
+    if not record or record.get("decision") not in {"approve", "edit"}:
+        return "没有对应的已批准审批记录，已拒绝写入 ERP"
+    if record.get("tool_name") != tool_name:
+        return "审批记录与当前工具不一致，已拒绝写入 ERP"
+    return None
 
 
 def latest_terminal(thread_id: str) -> dict | None:

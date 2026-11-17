@@ -293,6 +293,8 @@ def create_main_agent(
     mcp_tools = load_mcp_tools_sync()
     # 名字像写操作、却没有进入 WRITE_TOOLS 的 MCP 工具，默认拒绝启动。
     enforce_write_tool_coverage([tool.name for tool in mcp_tools])
+    from ..mcp_server.persistence import warn_if_memory_fallback_enabled
+    warn_if_memory_fallback_enabled(agent_logger)
     custom_tools = [generate_chart, web_search, web_fetch, install_skill, list_user_skills, request_order_info,
                     download_sandbox_file, list_sandbox_files,
                     generate_document, generate_table_report]

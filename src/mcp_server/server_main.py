@@ -42,5 +42,8 @@ def audit_registered_tools() -> None:
 
 if __name__ == "__main__":
     audit_registered_tools()
+    from src.mcp_server.persistence import warn_if_memory_fallback_enabled
+    import logging
+    warn_if_memory_fallback_enabled(logging.getLogger("mcp"))
     print(f"🚀 Starting MCP Server on {MCP_HOST}:{MCP_PORT} (SSE transport)")
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

@@ -7,17 +7,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime
 from typing import Any, Protocol
 
-from .config import MONGODB_DB_NAME, MONGODB_URI
 from .log_utils import agent_logger
+from ..mcp_server.persistence import MONGODB_DB_NAME, resolve_store
 
 
 UNAUTHENTICATED = "未认证"
-# 请求里的 user_id 尚未经过认证。R2 再替换成令牌中的身份。
-IDENTITY_NOTE = "请求中的 user_id，未认证；可信身份留给后续 R2"
+# 请求里的 user_id 尚未经过认证。多用户上线前必须完成 R2（身份认证）。
+IDENTITY_NOTE = "请求中的 user_id，未认证；可信身份留给后续 R2。多用户上线前必须完成 R2（身份认证）。"
 
 APPROVAL_FIELDS = (
     "approval_id",
@@ -189,19 +188,16 @@ def get_approval_store() -> ApprovalStore:
 
 
 def _build_default_store() -> ApprovalStore:
-    backend = os.getenv("APPROVAL_STORE_BACKEND", "auto").lower()
-    if backend == "memory":
-        return MemoryApprovalStore()
-    try:
-        from pymongo import MongoClient
-
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=400)
-        client.admin.command("ping")
+    def mongo_factory(client):
         agent_logger.info("审批审计写入 MongoDB approvals")
         return MongoApprovalStore(client, MONGODB_DB_NAME)
-    except Exception as exc:
-        agent_logger.warning(f"MongoDB approvals 不可用，审批记录退回进程内 ({type(exc).__name__})")
-        return MemoryApprovalStore()
+
+    return resolve_store(
+        mongo_factory,
+        MemoryApprovalStore,
+        logger=agent_logger,
+        component="审批记录",
+    )
 
 
 def reset_approval_runtime() -> None:

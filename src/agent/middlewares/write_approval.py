@@ -8,6 +8,7 @@ interrupt_on 仍由 WRITE_TOOLS 生成并交给框架的 HumanInTheLoop。
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,7 @@ from ..approval_store import (
     attach_erp_result,
     build_edit_diff,
     canonical_snapshot,
+    get_approval_store,
     pop_pending_by_call,
     record_decision,
     remember_pending,
@@ -30,6 +32,7 @@ from ..log_utils import agent_logger
 from ..mcp_tools_bean import WRITE_TOOLS
 from ..tools.write_validation import report_write_validation_error
 from ...mcp_server.idempotency import bind_approval_id, get_idempotency_store, reset_approval_id
+from ...mcp_server.persistence import ApprovalPersistenceUnavailable
 from ...mcp_server.order_validation import ORDER_WRITE_TOOLS, validate_order_write
 
 VALIDATION_TOOL = report_write_validation_error.name
@@ -132,6 +135,9 @@ class WriteApprovalMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         approval_id = str((request.tool_call.get("args") or {}).get("approval_id") or "")
         name = request.tool_call.get("name")
+        blocked = _blocked_write(name, request.tool_call.get("id"))
+        if blocked is not None:
+            return blocked
         if name in WRITE_TOOLS and approval_id:
             cached = get_idempotency_store().replay(approval_id)
             if cached is not None:
@@ -147,9 +153,29 @@ class WriteApprovalMiddleware(AgentMiddleware):
         return result
 
 
+def _blocked_write(name: str | None, tool_call_id: str | None):
+    if name not in WRITE_TOOLS:
+        return None
+    try:
+        get_idempotency_store()
+        get_approval_store()
+    except ApprovalPersistenceUnavailable as exc:
+        agent_logger.error(str(exc))
+        return ToolMessage(
+            content=json.dumps({"code": 503, "message": str(exc), "written": False}, ensure_ascii=False),
+            tool_call_id=tool_call_id,
+            name=name,
+            status="error",
+        )
+    return None
+
+
 def _guard_tool(request, handler):
     approval_id = str((request.tool_call.get("args") or {}).get("approval_id") or "")
     name = request.tool_call.get("name")
+    blocked = _blocked_write(name, request.tool_call.get("id"))
+    if blocked is not None:
+        return blocked
     if name in WRITE_TOOLS and approval_id:
         cached = get_idempotency_store().replay(approval_id)
         if cached is not None:

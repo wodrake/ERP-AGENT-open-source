@@ -1,0 +1,39 @@
+name: R1 approval
+
+on:
+  pull_request:
+  push:
+    branches:
+      - feat/r1-write-approval
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017
+      R1_REQUIRE_MONGO: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-observability.txt
+      - name: Existing unit tests
+        run: python -m unittest src.test.test_chat_interrupts src.test.test_observability src.test.test_progressive_skills src.test.test_sandbox_lifecycle src.test.test_memory_integration src.test.test_business_eval src.test.test_hybrid_review src.test.test_jev_router -q
+      - name: Memory tests
+        run: python -m src.test.test_memory_layer
+      - name: R1 approval tests including Mongo smoke
+        run: python -m unittest src.test.test_write_approval -q

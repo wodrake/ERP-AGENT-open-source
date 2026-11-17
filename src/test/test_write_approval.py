@@ -7,9 +7,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-os.environ.setdefault("APPROVAL_STORE_BACKEND", "memory")
-os.environ.setdefault("APPROVAL_IDEMPOTENCY_BACKEND", "memory")
-
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.tools import BaseTool
@@ -431,22 +428,97 @@ class MainAgentApprovalTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(field, edit_record)
 
 
+class PersistenceFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._allow = os.environ.pop("APPROVAL_STORE_ALLOW_MEMORY", None)
+        set_idempotency_store(None)
+        set_approval_store(None)
+
+    def tearDown(self):
+        set_idempotency_store(MemoryIdempotencyStore())
+        set_approval_store(MemoryApprovalStore())
+        if self._allow is None:
+            os.environ.pop("APPROVAL_STORE_ALLOW_MEMORY", None)
+        else:
+            os.environ["APPROVAL_STORE_ALLOW_MEMORY"] = self._allow
+
+    async def test_mongo_down_refuses_erp_write(self):
+        from src.mcp_server.tools import order_tools
+        from src.agent.approval_store import get_approval_store
+        from src.mcp_server.persistence import ApprovalPersistenceUnavailable
+
+        erp = SimpleNamespace(writes=0)
+
+        async def post(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {}}
+
+        with patch("src.mcp_server.persistence.open_mongo", side_effect=ConnectionError("down")):
+            with self.assertRaises(ApprovalPersistenceUnavailable) as caught:
+                get_approval_store()
+            self.assertIn("拒绝写入 ERP", str(caught.exception))
+            set_approval_store(None)
+            with patch.object(order_tools, "erp_client", SimpleNamespace(post=post)):
+                result = await order_tools.order_create(order_json(2, 25, 50), approval_id="ap-refuse")
+        self.assertEqual(erp.writes, 0)
+        body = json.loads(result)
+        self.assertFalse(body["written"])
+        self.assertIn("拒绝写入 ERP", body["message"])
+        self.assertEqual(body["code"], 503)
+
+    async def test_explicit_memory_fallback_dedupes_and_warns(self):
+        from src.mcp_server.tools import order_tools
+
+        os.environ["APPROVAL_STORE_ALLOW_MEMORY"] = "1"
+        erp = SimpleNamespace(writes=0)
+
+        async def post(*args, **kwargs):
+            erp.writes += 1
+            return {"code": 200, "data": {"id": 1}}
+
+        with patch("src.mcp_server.persistence.open_mongo", side_effect=ConnectionError("down")):
+            with self.assertLogs("mcp", level="WARNING") as logs:
+                with patch.object(order_tools, "erp_client", SimpleNamespace(post=post)):
+                    first = await order_tools.order_create(order_json(2, 25, 50), approval_id="ap-mem")
+                    second = await order_tools.order_create(order_json(2, 25, 50), approval_id="ap-mem")
+        self.assertEqual(erp.writes, 1)
+        self.assertEqual(first, second)
+        self.assertTrue(any("APPROVAL_STORE_ALLOW_MEMORY=1" in line for line in logs.output))
+
+    def test_startup_warns_only_when_memory_fallback_enabled(self):
+        from src.mcp_server.persistence import warn_if_memory_fallback_enabled
+
+        silent = Mock()
+        warn_if_memory_fallback_enabled(silent)
+        silent.warning.assert_not_called()
+        os.environ["APPROVAL_STORE_ALLOW_MEMORY"] = "1"
+        noisy = Mock()
+        warn_if_memory_fallback_enabled(noisy)
+        noisy.warning.assert_called_once()
+        self.assertIn("R2", noisy.warning.call_args.args[0])
+        self.assertIn("仅限本地开发", noisy.warning.call_args.args[0])
+
+
 class MongoApprovalSmokeTests(unittest.TestCase):
     def test_real_mongo_round_trip(self):
         client = None
+        uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
         try:
             from pymongo import MongoClient
-            client = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=400)
+            client = MongoClient(uri, serverSelectionTimeoutMS=400)
             client.admin.command("ping")
         except Exception:
             if client is not None:
                 client.close()
-            self.skipTest(
+            message = (
                 "MongoDB 不可用，已跳过真实冒烟。手动步骤："
                 "1) 启动 mongod，监听 mongodb://localhost:27017；"
                 "2) 运行 python -m unittest src.test.test_write_approval.MongoApprovalSmokeTests -v；"
                 "3) 该测试只写入并删除 erp_agent_r1_smoke.approvals 与 write_idempotency 中的合成记录。"
             )
+            if os.getenv("R1_REQUIRE_MONGO") == "1":
+                self.fail(message)
+            self.skipTest(message)
         from src.agent.approval_store import MongoApprovalStore
         from src.mcp_server.idempotency import MongoIdempotencyStore
 

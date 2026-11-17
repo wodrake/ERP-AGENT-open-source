@@ -225,9 +225,11 @@ python -m unittest src.test.test_hybrid_review -v
 ```
 
 ### 4. HITL 人工审批
-- 订单创建/更新触发 `interrupt_on` 中断
-- 前端展示审批卡片，用户批准后恢复执行
+- 全部 ERP 写操作（订单创建/修改/状态、出入库、供应商创建/状态、零件创建）执行前触发 `interrupt_on` 中断
+- 前端展示审批卡片（零件、数量、单价、合计、供应商、风险标签），可改数量或单价后批准；风险标签按操作类型划分，不是采购金额口径
+- 审批记录里的请求人和审批人目前取请求中的 `user_id`，并标注「未认证」。**多用户上线前必须完成 R2（身份认证）**
 - 缺少字段时触发信息补充中断
+- MongoDB 不可用时拒绝写 ERP。仅本地开发可设置 `APPROVAL_STORE_ALLOW_MEMORY=1` 退回进程内表，启动时会告警
 
 ### 5. 子Agent 委派
 - **procurement-analyst**：采购分析师（数据分析 + 图表生成）
@@ -416,8 +418,13 @@ LLM_BASE_URL=https://api.deepseek.com
 WEB_SEARCH_MODEL=deepseek-flash
 DEEPSEEK_RESPONSES_URL=https://api.deepseek.com/responses
 
-# MongoDB 连接
+# MongoDB 连接。写审批和幂等依赖它；连不上则拒绝写 ERP
 MONGODB_URI=mongodb://localhost:27017
+# 仅本地开发。设为 1 时，MongoDB 不可用才退回进程内表，并在启动时告警。
+# 多用户上线前必须完成 R2（身份认证），上线环境不要打开。
+# APPROVAL_STORE_ALLOW_MEMORY=1
+# 写工具清单自检默认拒绝启动。设为 0 则只告警。
+# WRITE_TOOL_AUDIT_STRICT=1
 
 # Java ERP 后端地址
 # 若没有自己的 ERP 服务，可先保留占位地址，联网搜索和基础对话仍可启动
@@ -510,7 +517,7 @@ MongoDB → Docker沙箱 → MCP Server(:9000) → Backend API(:8000) → Fronte
 预热池 → 认领 → MongoDB 缓存 → 新建 → 销毁。服务重启不丢失用户绑定关系，预热池保证 < 100ms 分配速度，健康检查 + 自动重建故障容器。
 
 ### 4. 完整的 HITL 审批流程
-订单创建/更新需人工审批，缺少字段时触发信息补充中断。基于 LangGraph 的 interrupt/resume 机制，前端展示审批卡片和信息补充表单。
+全部 ERP 写操作需人工审批，缺少字段时触发信息补充中断。基于 LangGraph 的 interrupt/resume 机制，前端展示审批卡片和信息补充表单。审批身份目前未认证，多用户上线前必须完成 R2（身份认证）。
 
 ### 5. 中间件栈
 沙箱健康检查、用户上下文注入（工厂模式防串扰）、技能增量同步、用户技能恢复、工具摘要监控、偏好自动提取、熔断器保护、调用限制。每个中间件都有明确的职责边界。

@@ -1,21 +1,24 @@
 """MCP 写工具幂等。
 
 ERP 不接受幂等键时，用 approval_id 在 MongoDB 去重表 write_idempotency 中只保留首次结果。
-MongoDB 不可用时退回进程内表，避免同进程重复写入；多进程部署需要可用的 MongoDB。
+MongoDB 不可用且未设置 APPROVAL_STORE_ALLOW_MEMORY=1 时，直接拒绝写 ERP。
 """
 from __future__ import annotations
 
 import contextvars
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Protocol
 
+from .persistence import (
+    MONGODB_DB_NAME,
+    ApprovalPersistenceUnavailable,
+    resolve_store,
+)
+
 
 mcp_logger = logging.getLogger("mcp")
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
 
 _approval_id: contextvars.ContextVar[str] = contextvars.ContextVar("erp_approval_id", default="")
@@ -46,7 +49,7 @@ class IdempotencyStore(Protocol):
 
 
 class MemoryIdempotencyStore:
-    """单进程去重表。测试和 Mongo 不可用时使用。"""
+    """单进程去重表。仅测试，或本地显式打开 APPROVAL_STORE_ALLOW_MEMORY 时使用。"""
 
     def __init__(self) -> None:
         self._rows: dict[str, dict] = {}
@@ -130,26 +133,28 @@ def get_idempotency_store() -> IdempotencyStore:
 
 
 def _build_default_store() -> IdempotencyStore:
-    backend = os.getenv("APPROVAL_IDEMPOTENCY_BACKEND", "auto").lower()
-    if backend == "memory":
-        return MemoryIdempotencyStore()
-    try:
-        from pymongo import MongoClient
-
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=400)
-        client.admin.command("ping")
+    def mongo_factory(client):
         mcp_logger.info("写操作幂等使用 MongoDB 去重表 write_idempotency")
         return MongoIdempotencyStore(client, MONGODB_DB_NAME)
-    except Exception as exc:
-        mcp_logger.warning(
-            f"MongoDB 去重表不可用，写操作幂等退回进程内表 ({type(exc).__name__})"
-        )
-        return MemoryIdempotencyStore()
+
+    return resolve_store(
+        mongo_factory,
+        MemoryIdempotencyStore,
+        logger=mcp_logger,
+        component="写操作幂等",
+    )
 
 
 def _conflict(approval_id: str) -> str:
     return json.dumps(
-        {"code": 409, "message": "相同审批正在执行，未再次写入 ERP", "approval_id": approval_id, "data": None},
+        {"code": 409, "message": "相同审批正在执行，未再次写入 ERP", "approval_id": approval_id, "data": None, "written": False},
+        ensure_ascii=False,
+    )
+
+
+def _refused(message: str) -> str:
+    return json.dumps(
+        {"code": 503, "message": message, "written": False, "data": None},
         ensure_ascii=False,
     )
 
@@ -160,11 +165,18 @@ async def run_idempotent(
     snapshot: Any,
     operation: Callable[[], Awaitable[str]],
 ) -> str:
-    """同一非空 approval_id 只执行一次 operation，重复调用返回首次结果。"""
+    """同一非空 approval_id 只执行一次 operation，重复调用返回首次结果。
+
+    持久化不可用时不调用 operation，因此不会写 ERP。
+    """
+    try:
+        store = get_idempotency_store()
+    except ApprovalPersistenceUnavailable as exc:
+        mcp_logger.error(str(exc))
+        return _refused(str(exc))
     approval_id = effective_approval_id(approval_id)
     if not approval_id:
         return await operation()
-    store = get_idempotency_store()
     cached = store.replay(approval_id)
     if cached is not None:
         mcp_logger.info(f"幂等命中，跳过 ERP 写入: {tool_name} {approval_id}")
